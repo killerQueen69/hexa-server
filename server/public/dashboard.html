@@ -505,7 +505,8 @@
       devices: [],
       preferences: null,
       refreshPromise: null,
-      collapsedCards: {}
+      collapsedCards: {},
+      pendingDeviceActions: new Set()
     };
 
     $("baseUrl").value = window.location.origin;
@@ -543,6 +544,22 @@
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#39;");
+    }
+
+    async function withDeviceActionLock(deviceId, fn) {
+      const key = String(deviceId || "").trim();
+      if (!key) {
+        return fn();
+      }
+      if (state.pendingDeviceActions.has(key)) {
+        throw new Error(`command_in_flight: Device ${key} already has a pending command.`);
+      }
+      state.pendingDeviceActions.add(key);
+      try {
+        return await fn();
+      } finally {
+        state.pendingDeviceActions.delete(key);
+      }
     }
 
     function parseIsoMs(value) {
@@ -847,7 +864,11 @@
 
     function toApiError(response, body, rawText) {
       if (body && typeof body === "object" && body.message) {
-        return new Error(`${body.code || "error"}: ${body.message}`);
+        const detailsText =
+          body.details && typeof body.details === "object"
+            ? ` details=${JSON.stringify(body.details).slice(0, 180)}`
+            : "";
+        return new Error(`${body.code || "error"}: ${body.message}${detailsText}`);
       }
       if (rawText) {
         const htmlLike = /^\s*<!doctype html/i.test(rawText) || /^\s*<html/i.test(rawText);
@@ -1505,9 +1526,11 @@
       try {
         if (relayCmd) {
           const [deviceId, idx, action] = relayCmd.split(":");
-          await api(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}/relays/${encodeURIComponent(idx)}`, {
-            method: "POST",
-            body: JSON.stringify({ action })
+          await withDeviceActionLock(deviceId, async () => {
+            await api(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}/relays/${encodeURIComponent(idx)}`, {
+              method: "POST",
+              body: JSON.stringify({ action })
+            });
           });
           log(`Relay command sent: ${deviceId} r${idx} ${action}`);
           await loadDevices();
@@ -1516,9 +1539,11 @@
 
         if (relayAll) {
           const [deviceId, action] = relayAll.split(":");
-          await api(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}/relays/all`, {
-            method: "POST",
-            body: JSON.stringify({ action })
+          await withDeviceActionLock(deviceId, async () => {
+            await api(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}/relays/all`, {
+              method: "POST",
+              body: JSON.stringify({ action })
+            });
           });
           log(`All-relay command sent: ${deviceId} ${action}`);
           await loadDevices();

@@ -161,11 +161,13 @@ Prefix: `/api/v1/devices`
 ### `POST /:id/relays/:index`
 
 - Body: `action` in `on|off|toggle`
+- Optional body field: `timeout_ms` (1000-30000) to override command ACK timeout per request.
 - Executes single relay command.
 
 ### `POST /:id/relays/all`
 
 - Body: `action` in `on|off`
+- Optional body field: `timeout_ms` (1000-30000) to override command ACK timeout per request.
 - Executes all-relays command.
 
 ### `POST /:id/token/rotate`
@@ -465,6 +467,11 @@ Prefix: `/api/v1/admin` (admin role required)
 - `POST /devices/:id/relays/:index`
 - `POST /devices/:id/relays/all`
 
+Relay/admin command behavior:
+
+- `device_disconnected` now returns HTTP `409` when the device disconnects before ACK.
+- `device_ack_timeout` returns HTTP `504` after timeout + optional state-verify window.
+
 ### Backup and Restore
 
 - `GET /ops/backup/policy`
@@ -526,6 +533,9 @@ Supported by configuring the server as an outbound MQTT client:
 - WAN tuning:
   - `HA_MQTT_KEEPALIVE_SECONDS`
   - `HA_MQTT_CONNECT_TIMEOUT_MS`
+  - `RELAY_COMMAND_TIMEOUT_MS`
+  - `RELAY_COMMAND_STATE_VERIFY_WINDOW_MS`
+  - `RELAY_COMMAND_STATE_VERIFY_POLL_MS`
 
 Notes:
 

@@ -127,11 +127,13 @@ const updateDeviceSchema = z.object({
 });
 
 const relayCommandSchema = z.object({
-  action: z.enum(["on", "off", "toggle"])
+  action: z.enum(["on", "off", "toggle"]),
+  timeout_ms: z.number().int().min(1000).max(30000).optional()
 });
 
 const allRelayCommandSchema = z.object({
-  action: z.enum(["on", "off"])
+  action: z.enum(["on", "off"]),
+  timeout_ms: z.number().int().min(1000).max(30000).optional()
 });
 
 const restoreDrillSchema = z.object({
@@ -824,6 +826,7 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
         deviceId: params.id,
         relayIndex,
         action: parsed.data.action,
+        timeoutMs: parsed.data.timeout_ms,
         source: {
           actorUserId: request.user.sub,
           source: "api"
@@ -832,7 +835,7 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
       return reply.send(result);
     } catch (error) {
       if (error instanceof RelayServiceError) {
-        return sendApiError(reply, error.statusCode, error.code, error.message);
+        return sendApiError(reply, error.statusCode, error.code, error.message, error.details);
       }
       throw error;
     }
@@ -849,6 +852,7 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
       const result = await relayService.setAllRelays({
         deviceId: params.id,
         action: parsed.data.action,
+        timeoutMs: parsed.data.timeout_ms,
         source: {
           actorUserId: request.user.sub,
           source: "api"
@@ -857,7 +861,7 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
       return reply.send(result);
     } catch (error) {
       if (error instanceof RelayServiceError) {
-        return sendApiError(reply, error.statusCode, error.code, error.message);
+        return sendApiError(reply, error.statusCode, error.code, error.message, error.details);
       }
       throw error;
     }

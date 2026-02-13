@@ -19,7 +19,7 @@
     "validate:signoff": "tsx scripts/validate-staging-signoff.ts",
     "test:unit": "cross-env NODE_ENV=test DB_SSL=false DB_SSL_REJECT_UNAUTHORIZED=false ENFORCE_HTTPS=false TRUST_PROXY=false tsx --test tests/unit/server.unit.test.ts",
     "test:security": "cross-env NODE_ENV=production DB_SSL=false DB_SSL_REJECT_UNAUTHORIZED=false ENFORCE_HTTPS=true TRUST_PROXY=true tsx --test tests/unit/transport-security.unit.test.ts",
-    "test:integration": "cross-env NODE_ENV=test DB_SSL=false DB_SSL_REJECT_UNAUTHORIZED=false ENFORCE_HTTPS=false TRUST_PROXY=false tsx --test tests/integration/server.integration.test.ts tests/integration/api-surface.integration.test.ts",
+    "test:integration": "cross-env NODE_ENV=test DB_SSL=false DB_SSL_REJECT_UNAUTHORIZED=false ENFORCE_HTTPS=false TRUST_PROXY=false tsx --test --test-concurrency=1 tests/integration/server.integration.test.ts tests/integration/api-surface.integration.test.ts",
     "test:e2e": "cross-env NODE_ENV=test DB_SSL=false DB_SSL_REJECT_UNAUTHORIZED=false ENFORCE_HTTPS=false TRUST_PROXY=false tsx --test tests/e2e/smoke.e2e.test.ts",
     "test:ci": "npm run lint && npm run migrate:smoke && npm run test:unit && npm run test:security && npm run test:integration && npm run test:e2e"
   },

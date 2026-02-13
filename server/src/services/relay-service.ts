@@ -1,3 +1,4 @@
+import { env } from "../config/env";
 import { query, withTransaction } from "../db/connection";
 import { realtimeHub } from "../realtime/hub";
 import { newId } from "../utils/crypto";
@@ -15,6 +16,13 @@ type DeviceRow = {
 
 type RelayStateRow = {
   is_on: boolean;
+  last_changed_at?: Date | string;
+};
+
+type RelayStateSetRow = {
+  relay_index: number;
+  is_on: boolean;
+  last_changed_at: Date | string;
 };
 
 type RelayAction = "on" | "off" | "toggle";
@@ -106,6 +114,43 @@ function ackErrorCode(error: unknown): string {
   return "device_ack_failed";
 }
 
+type AckFailure = {
+  statusCode: number;
+  code: string;
+  message: string;
+};
+
+function mapAckError(error: unknown): AckFailure {
+  const code = ackErrorCode(error);
+  if (code === "device_ack_timeout") {
+    return {
+      statusCode: 504,
+      code,
+      message: "Device ACK not received in time."
+    };
+  }
+  if (code === "device_disconnected") {
+    return {
+      statusCode: 409,
+      code,
+      message: "Device disconnected before ACK."
+    };
+  }
+  return {
+    statusCode: 504,
+    code,
+    message: "Device ACK failed."
+  };
+}
+
+function toEpochMs(value: Date | string | null | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  const ms = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -121,6 +166,127 @@ async function waitForDeviceSession(deviceUid: string, attempts = 4, waitMs = 15
       await sleep(waitMs);
     }
   }
+  return false;
+}
+
+async function waitForObservedRelayState(params: {
+  deviceId: string;
+  deviceUid: string;
+  relayIndex: number;
+  expectedState: boolean;
+  commandStartedAtMs: number;
+  waitWindowMs: number;
+  pollMs: number;
+}): Promise<boolean> {
+  if (params.waitWindowMs <= 0) {
+    return false;
+  }
+
+  const deadline = Date.now() + params.waitWindowMs;
+  while (Date.now() <= deadline) {
+    const snapshot = deviceStateCache.getSnapshotByUid(params.deviceUid);
+    if (snapshot) {
+      const relayState =
+        params.relayIndex >= 0 && params.relayIndex < snapshot.relays.length
+          ? snapshot.relays[params.relayIndex]
+          : null;
+      if (
+        relayState === params.expectedState &&
+        toEpochMs(snapshot.updatedAt) >= params.commandStartedAtMs
+      ) {
+        return true;
+      }
+    }
+
+    const observed = await query<RelayStateRow>(
+      `SELECT is_on, last_changed_at
+       FROM relay_states
+       WHERE device_id = $1
+         AND relay_index = $2
+       LIMIT 1`,
+      [params.deviceId, params.relayIndex]
+    );
+    const row = observed.rows[0];
+    if (
+      row &&
+      row.is_on === params.expectedState &&
+      toEpochMs(row.last_changed_at) >= params.commandStartedAtMs
+    ) {
+      return true;
+    }
+
+    if (Date.now() >= deadline) {
+      break;
+    }
+    await sleep(params.pollMs);
+  }
+
+  return false;
+}
+
+async function waitForObservedAllRelays(params: {
+  deviceId: string;
+  deviceUid: string;
+  relayCount: number;
+  expectedState: boolean;
+  commandStartedAtMs: number;
+  waitWindowMs: number;
+  pollMs: number;
+}): Promise<boolean> {
+  if (params.waitWindowMs <= 0) {
+    return false;
+  }
+
+  const deadline = Date.now() + params.waitWindowMs;
+  while (Date.now() <= deadline) {
+    const snapshot = deviceStateCache.getSnapshotByUid(params.deviceUid);
+    if (snapshot) {
+      const hasEnoughRelays = snapshot.relays.length >= params.relayCount;
+      const allExpected = hasEnoughRelays
+        ? snapshot.relays.slice(0, params.relayCount).every((isOn) => isOn === params.expectedState)
+        : false;
+      if (allExpected && toEpochMs(snapshot.updatedAt) >= params.commandStartedAtMs) {
+        return true;
+      }
+    }
+
+    const observed = await query<RelayStateSetRow>(
+      `SELECT relay_index, is_on, last_changed_at
+       FROM relay_states
+       WHERE device_id = $1`,
+      [params.deviceId]
+    );
+
+    if (observed.rows.length >= params.relayCount) {
+      const byIndex = new Map<number, RelayStateSetRow>();
+      for (const row of observed.rows) {
+        byIndex.set(row.relay_index, row);
+      }
+
+      let complete = true;
+      for (let i = 0; i < params.relayCount; i += 1) {
+        const row = byIndex.get(i);
+        if (
+          !row ||
+          row.is_on !== params.expectedState ||
+          toEpochMs(row.last_changed_at) < params.commandStartedAtMs
+        ) {
+          complete = false;
+          break;
+        }
+      }
+
+      if (complete) {
+        return true;
+      }
+    }
+
+    if (Date.now() >= deadline) {
+      break;
+    }
+    await sleep(params.pollMs);
+  }
+
   return false;
 }
 
@@ -237,10 +403,12 @@ class RelayService {
 
     const targetState = await resolveTargetState(params.deviceId, params.relayIndex, params.action);
     const commandId = newId();
+    const commandTimeoutMs = params.timeoutMs ?? env.RELAY_COMMAND_TIMEOUT_MS;
+    const commandStartedAtMs = Date.now();
     const pendingAck = realtimeHub.createPendingAck(
       commandId,
       device.device_uid,
-      params.timeoutMs ?? 5000
+      commandTimeoutMs
     );
 
     const relayCommand = {
@@ -265,10 +433,41 @@ class RelayService {
     }
 
     let ack;
+    let ackOrigin: "device_ack" | "state_report_verify" = "device_ack";
     try {
       ack = await pendingAck;
     } catch (error) {
-      throw new RelayServiceError(504, ackErrorCode(error), "Device ACK not received in time.");
+      const mapped = mapAckError(error);
+      if (mapped.code === "device_ack_timeout") {
+        const observed = await waitForObservedRelayState({
+          deviceId: params.deviceId,
+          deviceUid: device.device_uid,
+          relayIndex: params.relayIndex,
+          expectedState: targetState,
+          commandStartedAtMs,
+          waitWindowMs: env.RELAY_COMMAND_STATE_VERIFY_WINDOW_MS,
+          pollMs: env.RELAY_COMMAND_STATE_VERIFY_POLL_MS
+        });
+
+        if (observed) {
+          ack = {
+            commandId,
+            ok: true,
+            latencyMs: Date.now() - commandStartedAtMs
+          };
+          ackOrigin = "state_report_verify";
+        } else {
+          throw new RelayServiceError(mapped.statusCode, mapped.code, mapped.message, {
+            command_id: commandId,
+            timeout_ms: commandTimeoutMs,
+            verify_window_ms: env.RELAY_COMMAND_STATE_VERIFY_WINDOW_MS
+          });
+        }
+      } else {
+        throw new RelayServiceError(mapped.statusCode, mapped.code, mapped.message, {
+          command_id: commandId
+        });
+      }
     }
 
     if (!ack.ok) {
@@ -327,7 +526,8 @@ class RelayService {
         action: params.action,
         is_on: targetState,
         command_id: commandId,
-        latency_ms: ack.latencyMs
+        latency_ms: ack.latencyMs,
+        ack_origin: ackOrigin
       }
     });
 
@@ -349,10 +549,12 @@ class RelayService {
     }
 
     const commandId = newId();
+    const commandTimeoutMs = params.timeoutMs ?? env.RELAY_COMMAND_TIMEOUT_MS;
+    const commandStartedAtMs = Date.now();
     const pendingAck = realtimeHub.createPendingAck(
       commandId,
       device.device_uid,
-      params.timeoutMs ?? 5000
+      commandTimeoutMs
     );
 
     const allRelayCommand = {
@@ -376,10 +578,41 @@ class RelayService {
     }
 
     let ack;
+    let ackOrigin: "device_ack" | "state_report_verify" = "device_ack";
     try {
       ack = await pendingAck;
     } catch (error) {
-      throw new RelayServiceError(504, ackErrorCode(error), "Device ACK not received in time.");
+      const mapped = mapAckError(error);
+      if (mapped.code === "device_ack_timeout") {
+        const observed = await waitForObservedAllRelays({
+          deviceId: params.deviceId,
+          deviceUid: device.device_uid,
+          relayCount: device.relay_count,
+          expectedState: params.action === "on",
+          commandStartedAtMs,
+          waitWindowMs: env.RELAY_COMMAND_STATE_VERIFY_WINDOW_MS,
+          pollMs: env.RELAY_COMMAND_STATE_VERIFY_POLL_MS
+        });
+
+        if (observed) {
+          ack = {
+            commandId,
+            ok: true,
+            latencyMs: Date.now() - commandStartedAtMs
+          };
+          ackOrigin = "state_report_verify";
+        } else {
+          throw new RelayServiceError(mapped.statusCode, mapped.code, mapped.message, {
+            command_id: commandId,
+            timeout_ms: commandTimeoutMs,
+            verify_window_ms: env.RELAY_COMMAND_STATE_VERIFY_WINDOW_MS
+          });
+        }
+      } else {
+        throw new RelayServiceError(mapped.statusCode, mapped.code, mapped.message, {
+          command_id: commandId
+        });
+      }
     }
 
     if (!ack.ok) {
@@ -459,7 +692,8 @@ class RelayService {
         action: params.action,
         is_on: isOn,
         command_id: commandId,
-        latency_ms: ack.latencyMs
+        latency_ms: ack.latencyMs,
+        ack_origin: ackOrigin
       }
     });
 

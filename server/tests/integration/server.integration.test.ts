@@ -72,7 +72,7 @@ async function connectDeviceWs(
   deviceUid: string,
   deviceToken: string,
   options?: {
-    ackMode?: "normal" | "disconnect_on_command";
+    ackMode?: "normal" | "disconnect_on_command" | "drop_ack_keep_state" | "drop_ack_no_state";
   }
 ): Promise<ConnectedDevice> {
   const relays = [false, false, false];
@@ -117,21 +117,26 @@ async function connectDeviceWs(
         relays.fill(false);
       }
 
-      ws.send(
-        JSON.stringify({
-          type: "ack",
-          command_id: parsed.command_id,
-          ok: true,
-          ts: nowIso()
-        })
-      );
-      ws.send(
-        JSON.stringify({
-          type: "state_report",
-          relays,
-          ts: nowIso()
-        })
-      );
+      if (ackMode !== "drop_ack_keep_state" && ackMode !== "drop_ack_no_state") {
+        ws.send(
+          JSON.stringify({
+            type: "ack",
+            command_id: parsed.command_id,
+            ok: true,
+            ts: nowIso()
+          })
+        );
+      }
+
+      if (ackMode !== "drop_ack_no_state") {
+        ws.send(
+          JSON.stringify({
+            type: "state_report",
+            relays,
+            ts: nowIso()
+          })
+        );
+      }
       return;
     }
 
@@ -153,21 +158,26 @@ async function connectDeviceWs(
         }
       }
 
-      ws.send(
-        JSON.stringify({
-          type: "ack",
-          command_id: parsed.command_id,
-          ok: true,
-          ts: nowIso()
-        })
-      );
-      ws.send(
-        JSON.stringify({
-          type: "state_report",
-          relays,
-          ts: nowIso()
-        })
-      );
+      if (ackMode !== "drop_ack_keep_state" && ackMode !== "drop_ack_no_state") {
+        ws.send(
+          JSON.stringify({
+            type: "ack",
+            command_id: parsed.command_id,
+            ok: true,
+            ts: nowIso()
+          })
+        );
+      }
+
+      if (ackMode !== "drop_ack_no_state") {
+        ws.send(
+          JSON.stringify({
+            type: "state_report",
+            relays,
+            ts: nowIso()
+          })
+        );
+      }
       return;
     }
 
@@ -292,6 +302,7 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
   let deviceWs: ConnectedDevice | null = null;
   let clientWs: ConnectedClient | null = null;
   let timeoutDeviceWs: ConnectedDevice | null = null;
+  let fallbackAckDeviceWs: ConnectedDevice | null = null;
 
   try {
     const provisioned = await requestJson(`${httpBase}/api/v1/provision/register`, {
@@ -1052,7 +1063,7 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
     assert.equal(claimTimeoutDevice.status, 200);
 
     timeoutDeviceWs = await connectDeviceWs(wsBase, timeoutDeviceUid, timeoutDeviceToken, {
-      ackMode: "disconnect_on_command"
+      ackMode: "drop_ack_no_state"
     });
 
     const timeoutCommand = await requestJson(`${httpBase}/api/v1/devices/${timeoutDeviceId}/relays/0`, {
@@ -1066,14 +1077,69 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
       })
     });
     assert.equal(timeoutCommand.status, 504);
-    assert.ok(
-      timeoutCommand.body.code === "device_disconnected" ||
-        timeoutCommand.body.code === "device_ack_timeout"
-    );
+    assert.equal(timeoutCommand.body.code, "device_ack_timeout");
 
     await waitUntil(async () => {
       return (timeoutDeviceWs?.commandCount ?? 0) > 0;
     }, 5_000);
+
+    const fallbackProvisioned = await requestJson(`${httpBase}/api/v1/provision/register`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        provision_key: env.DEVICE_PROVISION_KEY,
+        chip_id: `it-fallback-chip-${newId()}`,
+        model: "hexa-mini-switch-v1"
+      })
+    });
+    assert.equal(fallbackProvisioned.status, 200);
+
+    const fallbackDeviceId = String(fallbackProvisioned.body.device_id);
+    const fallbackDeviceUid = String(fallbackProvisioned.body.device_uid);
+    const fallbackDeviceToken = String(fallbackProvisioned.body.device_token);
+    const fallbackClaimCode = String(fallbackProvisioned.body.claim_code);
+
+    const claimFallbackDevice = await requestJson(`${httpBase}/api/v1/devices/claim`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${accessToken}`
+      },
+      body: JSON.stringify({
+        claim_code: fallbackClaimCode
+      })
+    });
+    assert.equal(claimFallbackDevice.status, 200);
+
+    fallbackAckDeviceWs = await connectDeviceWs(wsBase, fallbackDeviceUid, fallbackDeviceToken, {
+      ackMode: "drop_ack_keep_state"
+    });
+
+    const fallbackAckCommand = await requestJson(`${httpBase}/api/v1/devices/${fallbackDeviceId}/relays/0`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${accessToken}`
+      },
+      body: JSON.stringify({
+        action: "on"
+      })
+    });
+    assert.equal(fallbackAckCommand.status, 200);
+
+    await waitUntil(async () => {
+      const relay = await query<{ is_on: boolean }>(
+        `SELECT is_on
+         FROM relay_states
+         WHERE device_id = $1
+           AND relay_index = 0
+         LIMIT 1`,
+        [fallbackDeviceId]
+      );
+      return relay.rows[0]?.is_on === true;
+    }, 7_000);
 
     const metricsResponse = await fetch(`${httpBase}/metrics`);
     const metricsText = await metricsResponse.text();
@@ -1096,6 +1162,9 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
     }
     if (timeoutDeviceWs?.ws.readyState === WebSocket.OPEN) {
       timeoutDeviceWs.ws.close(1000, "test_done");
+    }
+    if (fallbackAckDeviceWs?.ws.readyState === WebSocket.OPEN) {
+      fallbackAckDeviceWs.ws.close(1000, "test_done");
     }
     if (clientWs?.ws.readyState === WebSocket.OPEN) {
       clientWs.ws.close(1000, "test_done");

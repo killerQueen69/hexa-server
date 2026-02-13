@@ -567,6 +567,13 @@ function handleClientSocket(
     const deviceId = typeof message.device_id === "string" ? message.device_id : "";
     const scope = typeof message.scope === "string" ? message.scope : "single";
     const action = typeof message.action === "string" ? message.action : "";
+    const timeoutMs =
+      typeof message.timeout_ms === "number" &&
+      Number.isInteger(message.timeout_ms) &&
+      message.timeout_ms >= 1000 &&
+      message.timeout_ms <= 30000
+        ? message.timeout_ms
+        : undefined;
 
     if (!deviceId) {
       sendJson(socket, {
@@ -607,6 +614,7 @@ function handleClientSocket(
           const result = await relayService.setAllRelays({
             deviceId,
             action,
+            timeoutMs,
             source: {
               actorUserId: authedUserId as string,
               source: "ws_client"
@@ -653,6 +661,7 @@ function handleClientSocket(
           deviceId,
           relayIndex,
           action,
+          timeoutMs,
           source: {
             actorUserId: authedUserId as string,
             source: "ws_client"
@@ -672,6 +681,7 @@ function handleClientSocket(
             ok: false,
             code: error.code,
             message: error.message,
+            details: error.details ?? null,
             request_id: requestId
           });
           return;
