@@ -43,6 +43,9 @@ const wsPackage = require("ws") as {
   WebSocketServer: new (args: { noServer: boolean; maxPayload: number }) => RawWebSocketServer;
 };
 
+const DEVICE_WS_HEARTBEAT_INTERVAL_MS = 20_000;
+const DEVICE_WS_HEARTBEAT_MISS_LIMIT = 2;
+
 function sendJson(socket: RawWebSocket, payload: unknown): boolean {
   if (socket.readyState !== socket.OPEN) {
     return false;
@@ -202,9 +205,11 @@ function handleDeviceSocket(
   let heartbeat: NodeJS.Timeout | undefined;
   let authenticated = false;
   let alive = true;
+  let missedPongs = 0;
 
   socket.on("pong", () => {
     alive = true;
+    missedPongs = 0;
   });
 
   const shutdown = () => {
@@ -307,13 +312,18 @@ function handleDeviceSocket(
       }
 
       if (!alive) {
-        socket.terminate();
-        return;
+        missedPongs += 1;
+        if (missedPongs >= DEVICE_WS_HEARTBEAT_MISS_LIMIT) {
+          socket.terminate();
+          return;
+        }
+      } else {
+        missedPongs = 0;
       }
 
       alive = false;
       socket.ping();
-    }, 20_000);
+    }, DEVICE_WS_HEARTBEAT_INTERVAL_MS);
   })().catch(() => {
     socket.close(1011, "auth_error");
   });

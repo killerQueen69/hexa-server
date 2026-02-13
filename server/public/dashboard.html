@@ -505,7 +505,8 @@
       devices: [],
       preferences: null,
       refreshPromise: null,
-      collapsedCards: {}
+      collapsedCards: {},
+      pendingDeviceActions: new Map()
     };
 
     $("baseUrl").value = window.location.origin;
@@ -545,8 +546,27 @@
         .replace(/'/g, "&#39;");
     }
 
-    async function withDeviceActionLock(_deviceId, fn) {
-      return fn();
+    async function withDeviceActionLock(deviceId, fn) {
+      const key = String(deviceId || "").trim();
+      if (!key) {
+        return fn();
+      }
+
+      const previous = state.pendingDeviceActions.get(key) || Promise.resolve();
+      const run = previous
+        .catch(() => undefined)
+        .then(() => fn());
+
+      state.pendingDeviceActions.set(
+        key,
+        run.finally(() => {
+          if (state.pendingDeviceActions.get(key) === run) {
+            state.pendingDeviceActions.delete(key);
+          }
+        })
+      );
+
+      return run;
     }
 
     function parseIsoMs(value) {

@@ -40,15 +40,15 @@ class RealtimeHub {
 
   registerDevice(session: Omit<DeviceSession, "id">): DeviceSession {
     const existing = this.devices.get(session.deviceUid);
-    if (existing) {
-      existing.close();
-    }
-
     const fullSession: DeviceSession = {
       id: newId(),
       ...session
     };
     this.devices.set(fullSession.deviceUid, fullSession);
+
+    if (existing) {
+      existing.close();
+    }
 
     return fullSession;
   }
