@@ -1,3 +1,5 @@
 .pio/
 .vscode/
 platformio.secrets.ini
+*.log
+*.err
