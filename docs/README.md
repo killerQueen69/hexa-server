@@ -25,3 +25,4 @@
 - Sign-off state file: `docs/operations/staging-signoff.json`
 - HP t530 production deployment plan: `docs/operations/deployment-plan-hp-t530.md`
 - Cloudflare domain/tunnel setup for `vistfiy.store`: `docs/operations/cloudflare-vistfiy-setup.md`
+- Automatic deploy workflow: `.github/workflows/deploy-server.yml`

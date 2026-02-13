@@ -1,0 +1,54 @@
+name: deploy-server
+
+on:
+  workflow_run:
+    workflows:
+      - server-ci
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      fast:
+        description: "Skip unit tests on server update"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    environment: production
+    steps:
+      - name: Deploy to Debian server (full update)
+        if: github.event_name != 'workflow_dispatch' || inputs.fast != true
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          port: ${{ secrets.PROD_SSH_PORT }}
+          script_stop: true
+          command_timeout: 30m
+          script: |
+            sudo /opt/hexa/resltime/server/scripts/ops-update-server.sh --branch main
+
+      - name: Deploy to Debian server (fast update)
+        if: github.event_name == 'workflow_dispatch' && inputs.fast == true
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          port: ${{ secrets.PROD_SSH_PORT }}
+          script_stop: true
+          command_timeout: 30m
+          script: |
+            sudo /opt/hexa/resltime/server/scripts/ops-update-server.sh --branch main --fast

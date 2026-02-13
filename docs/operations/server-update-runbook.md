@@ -58,3 +58,43 @@ journalctl -u hexa-server.service -n 200 --no-pager
   1. inspect service logs
   2. check DB migration output
   3. rollback using `docs/operations/rollback-runbook.md`
+
+## 7. Automatic update on GitHub push (recommended)
+
+This repo includes workflow:
+- `.github/workflows/deploy-server.yml`
+
+Behavior:
+- On every successful `server-ci` run for `main`, deploy job runs over SSH.
+- Also supports manual run from GitHub Actions UI (`workflow_dispatch`), with optional `fast` mode.
+
+### Required GitHub secrets
+
+Set these repository secrets:
+- `PROD_SSH_HOST`
+- `PROD_SSH_PORT`
+- `PROD_SSH_USER`
+- `PROD_SSH_KEY` (private key content)
+
+### Debian host setup for deploy user
+
+1. Create deploy user (example `deployer`) and add its public key to:
+   - `/home/deployer/.ssh/authorized_keys`
+2. Allow passwordless sudo only for updater script:
+
+```bash
+sudo visudo -f /etc/sudoers.d/hexa-deployer
+```
+
+Add:
+
+```text
+deployer ALL=(root) NOPASSWD:/opt/hexa/resltime/server/scripts/ops-update-server.sh
+```
+
+3. Validate manually once:
+
+```bash
+ssh deployer@<server-ip>
+sudo /opt/hexa/resltime/server/scripts/ops-update-server.sh --help
+```

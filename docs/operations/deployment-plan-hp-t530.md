@@ -221,3 +221,7 @@ sudo /opt/hexa/resltime/server/scripts/ops-update-server.sh --fast
 
 Detailed procedure is documented in:
 - `docs/operations/server-update-runbook.md`
+
+For fully automatic updates after push to `main`, configure:
+- `.github/workflows/deploy-server.yml`
+- required repository secrets (`PROD_SSH_*`)
