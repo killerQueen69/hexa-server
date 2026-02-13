@@ -198,6 +198,7 @@ function handleDeviceSocket(
   let deviceUid: string | null = null;
   let deviceId: string | null = null;
   let ownerUserId: string | null = null;
+  let deviceSessionId: string | null = null;
   let heartbeat: NodeJS.Timeout | undefined;
   let authenticated = false;
   let alive = true;
@@ -239,7 +240,7 @@ function handleDeviceSocket(
     }
 
     if (deviceUid) {
-      realtimeHub.unregisterDevice(deviceUid);
+      realtimeHub.unregisterDevice(deviceUid, deviceSessionId ?? undefined);
     }
   };
 
@@ -267,7 +268,7 @@ function handleDeviceSocket(
     ownerUserId = row.owner_user_id;
     authenticated = true;
 
-    realtimeHub.registerDevice({
+    const session = realtimeHub.registerDevice({
       deviceId: row.id,
       deviceUid: row.device_uid,
       sendJson: (payload) => sendJson(socket, payload),
@@ -277,6 +278,7 @@ function handleDeviceSocket(
         }
       }
     });
+    deviceSessionId = session.id;
 
     await updateLastSeen(row.id, req.socket.remoteAddress ?? "");
 

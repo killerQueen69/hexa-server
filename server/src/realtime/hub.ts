@@ -53,9 +53,13 @@ class RealtimeHub {
     return fullSession;
   }
 
-  unregisterDevice(deviceUid: string): void {
+  unregisterDevice(deviceUid: string, sessionId?: string): void {
     const session = this.devices.get(deviceUid);
     if (!session) {
+      return;
+    }
+
+    if (sessionId && session.id !== sessionId) {
       return;
     }
 
