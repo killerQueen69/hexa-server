@@ -333,6 +333,11 @@ function handleDeviceSocket(
       return;
     }
 
+    // Some embedded clients may not surface explicit pong frames reliably.
+    // Treat any inbound device frame as proof of liveness.
+    alive = true;
+    missedPongs = 0;
+
     const parsed = parseMessage(raw);
     if (!parsed || typeof parsed !== "object") {
       return;
