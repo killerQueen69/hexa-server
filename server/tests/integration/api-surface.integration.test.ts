@@ -201,6 +201,45 @@ test("integration: API surface coverage for admin/user/webhook routes", async ()
     });
     assert.equal(adminPatchUser.status, 200);
 
+    const deletableEmail = `surface-delete-${newId()}@example.com`;
+    const deletablePassword = "SurfaceDeletePass!234";
+    const deletableRegister = await injectJson(app, {
+      method: "POST",
+      url: "/api/v1/auth/register",
+      payload: {
+        email: deletableEmail,
+        password: deletablePassword,
+        name: "Surface Delete Candidate"
+      }
+    });
+    assert.equal(deletableRegister.status, 201);
+    const deletableUserRow = await query<{ id: string }>(
+      `SELECT id
+       FROM users
+       WHERE email = $1
+       LIMIT 1`,
+      [deletableEmail]
+    );
+    const deletableUserId = deletableUserRow.rows[0]?.id;
+    assert.equal(typeof deletableUserId, "string");
+
+    const adminDeleteUser = await injectJson(app, {
+      method: "DELETE",
+      url: `/api/v1/admin/users/${deletableUserId}`,
+      headers: authHeaders(adminAccessToken)
+    });
+    assert.equal(adminDeleteUser.status, 200);
+
+    const deletedUserLogin = await injectJson(app, {
+      method: "POST",
+      url: "/api/v1/auth/login",
+      payload: {
+        email: deletableEmail,
+        password: deletablePassword
+      }
+    });
+    assert.equal(deletedUserLogin.status, 401);
+
     const adminDevices = await injectJson(app, {
       method: "GET",
       url: "/api/v1/admin/devices",

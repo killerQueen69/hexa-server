@@ -13,6 +13,7 @@ Options:
   --service <name>          systemd service name (default: hexa-server.service)
   --branch <name>           Git branch to deploy (default: main)
   --health-url <url>        Healthcheck URL (default: http://127.0.0.1:3000/health)
+  --run-tests               Run npm test:unit during update (off by default on production updates)
   --skip-tests              Skip npm test:unit during update
   --skip-migrate            Skip npm run migrate
   --skip-pull               Skip git fetch/pull (use current working tree)
@@ -30,7 +31,8 @@ REPO_DIR="/opt/hexa/resltime"
 SERVICE_NAME="hexa-server.service"
 BRANCH_NAME="main"
 HEALTH_URL="http://127.0.0.1:3000/health"
-SKIP_TESTS=0
+# Production updates should not mutate the live DB via unit tests.
+SKIP_TESTS=1
 SKIP_MIGRATE=0
 SKIP_PULL=0
 
@@ -54,6 +56,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-tests)
       SKIP_TESTS=1
+      shift
+      ;;
+    --run-tests)
+      SKIP_TESTS=0
       shift
       ;;
     --skip-migrate)

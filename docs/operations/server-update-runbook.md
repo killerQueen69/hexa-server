@@ -24,9 +24,16 @@ This performs:
 - `npm ci`
 - `npm run build`
 - `npm run migrate`
-- `npm run test:unit`
 - `systemctl restart hexa-server.service`
 - health check on `http://127.0.0.1:3000/health`
+
+Note: unit tests are skipped by default in production updates to avoid mutating the live database.
+
+If you explicitly want to run unit tests during update:
+
+```bash
+sudo /opt/hexa/resltime/server/scripts/ops-update-server.sh --run-tests
+```
 
 ## 3. Fast update (skip tests)
 

@@ -303,6 +303,24 @@ async function userExists(userId: string): Promise<boolean> {
   return Boolean(result.rowCount && result.rowCount > 0);
 }
 
+async function adminUserCount(client?: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<{ total: string }> }> }): Promise<number> {
+  if (client) {
+    const result = await client.query(
+      `SELECT COUNT(*)::text AS total
+       FROM users
+       WHERE role = 'admin'`
+    );
+    return Number(result.rows[0]?.total ?? "0");
+  }
+
+  const result = await query<{ total: string }>(
+    `SELECT COUNT(*)::text AS total
+     FROM users
+     WHERE role = 'admin'`
+  );
+  return Number(result.rows[0]?.total ?? "0");
+}
+
 async function listGlobalDevices(): Promise<DeviceRow[]> {
   const result = await query<DeviceRow>(
     `SELECT
@@ -560,6 +578,80 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
       return sendApiError(reply, 404, "not_found", "User not found.");
     }
     return reply.send(serializeUser(updated.rows[0]));
+  });
+
+  server.delete("/users/:id", { preHandler: preHandlers }, async (request, reply) => {
+    const params = request.params as { id: string };
+    if (!params.id || typeof params.id !== "string") {
+      return sendApiError(reply, 400, "validation_error", "User id is required.");
+    }
+
+    if (params.id === request.user.sub) {
+      return sendApiError(reply, 400, "validation_error", "You cannot delete your own admin account.");
+    }
+
+    const outcome = await withTransaction(async (client) => {
+      const existing = await client.query<{ id: string; role: "admin" | "user" }>(
+        `SELECT id, role
+         FROM users
+         WHERE id = $1
+         LIMIT 1
+         FOR UPDATE`,
+        [params.id]
+      );
+
+      if (!existing.rowCount || existing.rowCount === 0) {
+        return { kind: "not_found" as const };
+      }
+
+      const userRole = existing.rows[0].role;
+      if (userRole === "admin") {
+        const admins = await adminUserCount(client);
+        if (admins <= 1) {
+          return { kind: "last_admin" as const };
+        }
+      }
+
+      const now = nowIso();
+      const claimSalt = newId();
+      const releasedDevices = await client.query<{ id: string }>(
+        `UPDATE devices
+         SET owner_user_id = NULL,
+             claim_code = UPPER(SUBSTRING(MD5(device_uid || $2::text || random()::text) FROM 1 FOR 8)),
+             claim_code_created_at = $3,
+             updated_at = $3
+         WHERE owner_user_id = $1
+         RETURNING id`,
+        [params.id, claimSalt, now]
+      );
+
+      await client.query(`DELETE FROM user_devices WHERE user_id = $1`, [params.id]);
+
+      await client.query(
+        `DELETE FROM users
+         WHERE id = $1`,
+        [params.id]
+      );
+
+      return {
+        kind: "deleted" as const,
+        releasedDevices: releasedDevices.rowCount ?? 0
+      };
+    });
+
+    if (outcome.kind === "not_found") {
+      return sendApiError(reply, 404, "not_found", "User not found.");
+    }
+
+    if (outcome.kind === "last_admin") {
+      return sendApiError(reply, 409, "last_admin", "Cannot delete the last admin user.");
+    }
+
+    return reply.send({
+      ok: true,
+      deleted_user_id: params.id,
+      released_devices: outcome.releasedDevices
+    });
   });
 
   server.get("/devices", { preHandler: preHandlers }, async (_request, reply) => {

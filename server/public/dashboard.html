@@ -505,8 +505,7 @@
       devices: [],
       preferences: null,
       refreshPromise: null,
-      collapsedCards: {},
-      pendingDeviceActions: new Set()
+      collapsedCards: {}
     };
 
     $("baseUrl").value = window.location.origin;
@@ -546,20 +545,8 @@
         .replace(/'/g, "&#39;");
     }
 
-    async function withDeviceActionLock(deviceId, fn) {
-      const key = String(deviceId || "").trim();
-      if (!key) {
-        return fn();
-      }
-      if (state.pendingDeviceActions.has(key)) {
-        throw new Error(`command_in_flight: Device ${key} already has a pending command.`);
-      }
-      state.pendingDeviceActions.add(key);
-      try {
-        return await fn();
-      } finally {
-        state.pendingDeviceActions.delete(key);
-      }
+    async function withDeviceActionLock(_deviceId, fn) {
+      return fn();
     }
 
     function parseIsoMs(value) {
@@ -1009,7 +996,12 @@
           </td>
           <td>${escapeHtml(u.device_count)}</td>
           <td><input type="checkbox" data-user-active="${escapeHtml(u.id)}" ${u.is_active ? "checked" : ""} /></td>
-          <td><button data-user-save="${escapeHtml(u.id)}">Save</button></td>
+          <td>
+            <div class="row">
+              <button data-user-save="${escapeHtml(u.id)}">Save</button>
+              <button data-user-delete="${escapeHtml(u.id)}" class="danger" ${state.user?.id === u.id ? "disabled" : ""}>Delete</button>
+            </div>
+          </td>
         </tr>
       `).join("");
 
@@ -1494,10 +1486,24 @@
     $("usersTable").addEventListener("click", async (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
+      const userDeleteId = target.getAttribute("data-user-delete");
       const userId = target.getAttribute("data-user-save");
-      if (!userId) return;
 
       try {
+        if (userDeleteId) {
+          if (!window.confirm(`Delete user ${userDeleteId}? This action cannot be undone.`)) {
+            return;
+          }
+          await api(`/api/v1/admin/users/${encodeURIComponent(userDeleteId)}`, {
+            method: "DELETE"
+          });
+          log(`User ${userDeleteId} deleted.`);
+          await Promise.all([loadUsers(), loadDevices(), loadOverview()]);
+          return;
+        }
+
+        if (!userId) return;
+
         const name = document.querySelector(`[data-user-name=\"${userId}\"]`)?.value || "";
         const role = document.querySelector(`[data-user-role=\"${userId}\"]`)?.value || "user";
         const isActive = Boolean(document.querySelector(`[data-user-active=\"${userId}\"]`)?.checked);
