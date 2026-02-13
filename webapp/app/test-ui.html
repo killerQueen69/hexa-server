@@ -1,0 +1,748 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hexa Test Console</title>
+  <style>
+    :root {
+      --bg: #f4f6f2;
+      --surface: #ffffff;
+      --ink: #18211b;
+      --muted: #55655a;
+      --line: #d7e1d8;
+      --brand: #1e8a5a;
+      --brand-strong: #146844;
+      --danger: #b53d34;
+      --warn: #9b6a1f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 500px at 100% -200px, #d9efe3 0%, transparent 70%),
+        radial-gradient(1000px 500px at -200px -180px, #f2ead2 0%, transparent 70%),
+        var(--bg);
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    .page {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 10px 30px rgba(10, 18, 13, 0.06);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: 0.3px;
+    }
+
+    h2 {
+      margin: 0 0 10px 0;
+      font-size: 18px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .grid.cols-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .grid.cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    input,
+    textarea,
+    select,
+    button {
+      font: inherit;
+    }
+
+    input,
+    textarea,
+    select {
+      width: 100%;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fcfefc;
+      color: var(--ink);
+    }
+
+    textarea {
+      min-height: 70px;
+      resize: vertical;
+    }
+
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 8px 11px;
+      cursor: pointer;
+      color: #fff;
+      background: var(--brand);
+      transition: transform 0.08s ease, background-color 0.2s ease;
+    }
+
+    button:hover {
+      background: var(--brand-strong);
+    }
+
+    button:active {
+      transform: translateY(1px);
+    }
+
+    button.secondary {
+      background: #3d5a4a;
+    }
+
+    button.warn {
+      background: var(--warn);
+    }
+
+    button.danger {
+      background: var(--danger);
+    }
+
+    button.ghost {
+      background: transparent;
+      border-color: var(--line);
+      color: var(--ink);
+    }
+
+    .meta {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .token {
+      word-break: break-all;
+      font-family: Consolas, "Courier New", monospace;
+      background: #f8faf8;
+      border: 1px dashed var(--line);
+      border-radius: 10px;
+      padding: 8px;
+      margin-top: 8px;
+    }
+
+    .device-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .device-card {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      background: #fbfdfb;
+    }
+
+    .pill {
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      background: #e6ece8;
+      color: #324438;
+      display: inline-block;
+    }
+
+    .pill.online {
+      background: #d6f3e5;
+      color: #0f7045;
+    }
+
+    .pill.offline {
+      background: #fae7e5;
+      color: #8b2c27;
+    }
+
+    .relay-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .relay {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px;
+      background: #fff;
+    }
+
+    .relay .state {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    #log {
+      width: 100%;
+      min-height: 220px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #101712;
+      color: #d9f1de;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      padding: 10px;
+      white-space: pre-wrap;
+      overflow: auto;
+    }
+
+    @media (max-width: 860px) {
+      .grid.cols-3,
+      .grid.cols-2 {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="panel">
+      <h1>Hexa Test Console</h1>
+      <div class="meta">Quick manual UI for auth, device listing, relay commands, and realtime events.</div>
+    </div>
+
+    <div class="panel">
+      <h2>Connection</h2>
+      <div class="grid cols-3">
+        <div>
+          <label for="baseUrl">API Base URL</label>
+          <input id="baseUrl" />
+        </div>
+        <div>
+          <label for="email">Email</label>
+          <input id="email" type="email" placeholder="admin@example.com" />
+        </div>
+        <div>
+          <label for="password">Password</label>
+          <input id="password" type="password" placeholder="password" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 10px;">
+        <button id="loginBtn">Login</button>
+        <button id="registerBtn" class="secondary">Register</button>
+        <button id="refreshBtn" class="ghost">Refresh Token</button>
+        <button id="logoutBtn" class="danger">Logout</button>
+        <button id="loadDevicesBtn" class="warn">Load Devices</button>
+      </div>
+      <div class="grid cols-2" style="margin-top: 10px;">
+        <div>
+          <label for="claimCode">Claim Code</label>
+          <input id="claimCode" placeholder="AB12CD34" />
+        </div>
+        <div class="row" style="align-items: end;">
+          <button id="claimBtn">Claim Device</button>
+        </div>
+      </div>
+      <div id="authMeta" class="meta" style="margin-top: 8px;">Not authenticated</div>
+      <div id="tokenView" class="token" hidden></div>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="justify-content: space-between;">
+        <h2 style="margin: 0;">Devices</h2>
+        <div class="row">
+          <button id="wsConnectBtn" class="secondary">Connect WS</button>
+          <button id="wsDisconnectBtn" class="ghost">Disconnect WS</button>
+        </div>
+      </div>
+      <div id="wsMeta" class="meta">WS: disconnected</div>
+      <div id="deviceList" class="device-list" style="margin-top: 10px;"></div>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="justify-content: space-between;">
+        <h2 style="margin: 0;">Event Log</h2>
+        <button id="clearLogBtn" class="ghost">Clear</button>
+      </div>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <script>
+    const baseUrlInput = document.getElementById("baseUrl");
+    const emailInput = document.getElementById("email");
+    const passwordInput = document.getElementById("password");
+    const loginBtn = document.getElementById("loginBtn");
+    const registerBtn = document.getElementById("registerBtn");
+    const refreshBtn = document.getElementById("refreshBtn");
+    const logoutBtn = document.getElementById("logoutBtn");
+    const loadDevicesBtn = document.getElementById("loadDevicesBtn");
+    const claimCodeInput = document.getElementById("claimCode");
+    const claimBtn = document.getElementById("claimBtn");
+    const wsConnectBtn = document.getElementById("wsConnectBtn");
+    const wsDisconnectBtn = document.getElementById("wsDisconnectBtn");
+    const clearLogBtn = document.getElementById("clearLogBtn");
+    const authMeta = document.getElementById("authMeta");
+    const tokenView = document.getElementById("tokenView");
+    const wsMeta = document.getElementById("wsMeta");
+    const deviceList = document.getElementById("deviceList");
+    const logEl = document.getElementById("log");
+
+    const state = {
+      accessToken: "",
+      refreshToken: "",
+      user: null,
+      devices: [],
+      ws: null,
+      onlineByUid: {},
+      relayByUid: {}
+    };
+    const ONLINE_LAST_SEEN_WINDOW_MS = 90 * 1000;
+
+    baseUrlInput.value = window.location.origin;
+
+    function ts() {
+      return new Date().toISOString().slice(11, 19);
+    }
+
+    function log(line) {
+      logEl.textContent += "[" + ts() + "] " + line + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function normalizeBaseUrl(url) {
+      return (url || "").trim().replace(/\/+$/, "");
+    }
+
+    function wsUrlFromBase(base) {
+      return base.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
+    }
+
+    function setAuthMeta() {
+      if (!state.user) {
+        authMeta.textContent = "Not authenticated";
+        tokenView.hidden = true;
+        tokenView.textContent = "";
+        return;
+      }
+      authMeta.textContent = "User: " + state.user.email + " (" + state.user.role + ")";
+      tokenView.hidden = false;
+      tokenView.textContent = "access_token: " + state.accessToken;
+    }
+
+    async function api(path, options) {
+      const base = normalizeBaseUrl(baseUrlInput.value);
+      const headers = Object.assign(
+        { "content-type": "application/json" },
+        options && options.headers ? options.headers : {}
+      );
+      if (state.accessToken) {
+        headers.authorization = "Bearer " + state.accessToken;
+      }
+
+      const response = await fetch(base + path, Object.assign({}, options, { headers }));
+      const text = await response.text();
+      let data = null;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
+        }
+      }
+
+      if (!response.ok) {
+        const code = data && data.error && data.error.code ? data.error.code : response.status;
+        throw new Error("HTTP " + response.status + " (" + code + ")");
+      }
+      return data;
+    }
+
+    function applyRelayStateMessage(deviceUid, relays) {
+      if (!Array.isArray(relays)) {
+        return;
+      }
+      const current = Object.assign({}, state.relayByUid[deviceUid] || {});
+      if (relays.length > 0 && typeof relays[0] === "boolean") {
+        for (let i = 0; i < relays.length; i += 1) {
+          current[i] = relays[i];
+        }
+      } else {
+        for (const item of relays) {
+          if (!item || typeof item !== "object") continue;
+          const idx = Number(item.relay_index);
+          if (Number.isInteger(idx) && typeof item.is_on === "boolean") {
+            current[idx] = item.is_on;
+          }
+        }
+      }
+      state.relayByUid[deviceUid] = current;
+    }
+
+    function isRecentlySeen(lastSeenAt) {
+      if (!lastSeenAt || typeof lastSeenAt !== "string") {
+        return false;
+      }
+      const parsed = Date.parse(lastSeenAt);
+      if (!Number.isFinite(parsed)) {
+        return false;
+      }
+      return (Date.now() - parsed) <= ONLINE_LAST_SEEN_WINDOW_MS;
+    }
+
+    function syncDeviceTransientState(devices) {
+      const nextOnlineByUid = {};
+      const nextRelayByUid = {};
+
+      for (const device of devices) {
+        const uid = device && typeof device.device_uid === "string" ? device.device_uid : "";
+        if (!uid) {
+          continue;
+        }
+
+        nextOnlineByUid[uid] = state.onlineByUid[uid] === true || isRecentlySeen(device.last_seen_at);
+        if (state.relayByUid[uid]) {
+          nextRelayByUid[uid] = state.relayByUid[uid];
+        }
+      }
+
+      state.onlineByUid = nextOnlineByUid;
+      state.relayByUid = nextRelayByUid;
+    }
+
+    function renderDevices() {
+      if (!state.devices.length) {
+        deviceList.innerHTML = "<div class='meta'>No devices loaded.</div>";
+        return;
+      }
+
+      const blocks = [];
+      for (const d of state.devices) {
+        const online = state.onlineByUid[d.device_uid] === true;
+        const relayCount = Number(d.relay_count || 0);
+        const relayState = state.relayByUid[d.device_uid] || {};
+
+        let relays = "";
+        for (let i = 0; i < relayCount; i += 1) {
+          const relayLabel = Array.isArray(d.relay_names) && d.relay_names[i] ? d.relay_names[i] : ("Relay " + (i + 1));
+          const isOn = relayState[i] === true ? "ON" : relayState[i] === false ? "OFF" : "UNKNOWN";
+          relays +=
+            "<div class='relay'>" +
+            "<strong>" + relayLabel + "</strong>" +
+            "<div class='state'>State: " + isOn + "</div>" +
+            "<div class='row'>" +
+            "<button data-action='relay' data-device='" + d.id + "' data-idx='" + i + "' data-value='on'>On</button>" +
+            "<button data-action='relay' data-device='" + d.id + "' data-idx='" + i + "' data-value='off' class='secondary'>Off</button>" +
+            "<button data-action='relay' data-device='" + d.id + "' data-idx='" + i + "' data-value='toggle' class='warn'>Toggle</button>" +
+            "</div>" +
+            "</div>";
+        }
+
+        blocks.push(
+          "<div class='device-card'>" +
+          "<div class='row' style='justify-content: space-between;'>" +
+          "<div><strong>" + d.name + "</strong> <span class='meta'>(" + d.device_uid + ")</span></div>" +
+          "<span class='pill " + (online ? "online" : "offline") + "'>" + (online ? "online" : "offline") + "</span>" +
+          "</div>" +
+          "<div class='meta'>id: " + d.id + "</div>" +
+          "<div class='row' style='margin-top: 8px;'>" +
+          "<button data-action='all' data-device='" + d.id + "' data-value='on'>All On</button>" +
+          "<button data-action='all' data-device='" + d.id + "' data-value='off' class='secondary'>All Off</button>" +
+          "<button data-action='release' data-device='" + d.id + "' class='danger'>Release</button>" +
+          "</div>" +
+          "<div class='relay-grid'>" + relays + "</div>" +
+          "</div>"
+        );
+      }
+
+      deviceList.innerHTML = blocks.join("");
+    }
+
+    async function loadDevices() {
+      const devices = await api("/api/v1/devices", { method: "GET" });
+      state.devices = Array.isArray(devices) ? devices : [];
+      syncDeviceTransientState(state.devices);
+      renderDevices();
+      log("Loaded " + state.devices.length + " device(s).");
+    }
+
+    function disconnectWs() {
+      if (state.ws) {
+        state.ws.close();
+        state.ws = null;
+      }
+      wsMeta.textContent = "WS: disconnected";
+    }
+
+    function connectWs() {
+      if (!state.accessToken) {
+        log("Cannot connect WS: login first.");
+        return;
+      }
+
+      disconnectWs();
+      const base = normalizeBaseUrl(baseUrlInput.value);
+      const wsUrl = wsUrlFromBase(base) + "/ws/client";
+      const ws = new WebSocket(wsUrl);
+      state.ws = ws;
+      wsMeta.textContent = "WS: connecting";
+      log("WS connecting: " + wsUrl);
+
+      ws.onopen = () => {
+        wsMeta.textContent = "WS: open";
+        ws.send(JSON.stringify({
+          type: "auth",
+          access_token: state.accessToken
+        }));
+      };
+
+      ws.onclose = () => {
+        wsMeta.textContent = "WS: closed";
+        log("WS closed.");
+      };
+
+      ws.onerror = () => {
+        wsMeta.textContent = "WS: error";
+        log("WS error.");
+      };
+
+      ws.onmessage = (event) => {
+        let data = event.data;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          log("WS raw: " + event.data);
+          return;
+        }
+
+        const type = data && data.type ? data.type : "unknown";
+        if (type === "device_online" && data.device_uid) {
+          state.onlineByUid[data.device_uid] = true;
+          renderDevices();
+        } else if (type === "device_offline" && data.device_uid) {
+          state.onlineByUid[data.device_uid] = false;
+          renderDevices();
+        } else if (type === "device_state" && data.device_uid) {
+          applyRelayStateMessage(data.device_uid, data.relays);
+          renderDevices();
+        }
+
+        log("WS " + type + ": " + JSON.stringify(data));
+      };
+    }
+
+    async function runAuth(endpoint) {
+      const email = emailInput.value.trim();
+      const password = passwordInput.value;
+      if (!email || !password) {
+        log("Email/password required.");
+        return;
+      }
+      const payload = endpoint === "register"
+        ? {
+            email,
+            password,
+            name: email.split("@")[0] || "tester",
+            claim_code: claimCodeInput.value.trim() || undefined
+          }
+        : { email, password };
+
+      const out = await api("/api/v1/auth/" + endpoint, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      state.user = out.user;
+      state.accessToken = out.access_token || "";
+      state.refreshToken = out.refresh_token || "";
+      setAuthMeta();
+      log(endpoint + " OK for " + state.user.email);
+      connectWs();
+      await loadDevices();
+    }
+
+    async function claimDevice() {
+      const claimCode = claimCodeInput.value.trim().toUpperCase();
+      if (!claimCode) {
+        log("Claim code required.");
+        return;
+      }
+      const result = await api("/api/v1/devices/claim", {
+        method: "POST",
+        body: JSON.stringify({ claim_code: claimCode })
+      });
+      if (result && result.device && typeof result.device.device_uid === "string") {
+        const uid = result.device.device_uid;
+        state.onlineByUid[uid] = state.onlineByUid[uid] === true || isRecentlySeen(result.device.last_seen_at);
+      }
+      log("Claim OK: " + JSON.stringify(result));
+      await loadDevices();
+    }
+
+    async function refreshToken() {
+      if (!state.refreshToken) {
+        log("No refresh token in memory.");
+        return;
+      }
+      const out = await api("/api/v1/auth/refresh", {
+        method: "POST",
+        body: JSON.stringify({ refresh_token: state.refreshToken })
+      });
+      state.accessToken = out.access_token || "";
+      state.refreshToken = out.refresh_token || state.refreshToken;
+      setAuthMeta();
+      log("Token refreshed.");
+      connectWs();
+    }
+
+    async function logout() {
+      if (state.refreshToken) {
+        await api("/api/v1/auth/logout", {
+          method: "POST",
+          body: JSON.stringify({ refresh_token: state.refreshToken })
+        });
+      }
+      state.accessToken = "";
+      state.refreshToken = "";
+      state.user = null;
+      state.devices = [];
+      state.onlineByUid = {};
+      state.relayByUid = {};
+      setAuthMeta();
+      disconnectWs();
+      renderDevices();
+      log("Logged out.");
+    }
+
+    async function runRelayCommand(deviceId, relayIndex, action) {
+      const result = await api("/api/v1/devices/" + deviceId + "/relays/" + relayIndex, {
+        method: "POST",
+        body: JSON.stringify({ action })
+      });
+      log("Relay cmd OK: " + JSON.stringify(result));
+    }
+
+    async function runAllRelayCommand(deviceId, action) {
+      const result = await api("/api/v1/devices/" + deviceId + "/relays/all", {
+        method: "POST",
+        body: JSON.stringify({ action })
+      });
+      log("All-relay cmd OK: " + JSON.stringify(result));
+    }
+
+    deviceList.addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const actionType = target.getAttribute("data-action");
+      if (!actionType) return;
+
+      const deviceId = target.getAttribute("data-device");
+      const value = target.getAttribute("data-value");
+      if (!deviceId || !value) return;
+
+      try {
+        if (actionType === "relay") {
+          const idx = Number(target.getAttribute("data-idx"));
+          if (!Number.isInteger(idx)) return;
+          await runRelayCommand(deviceId, idx, value);
+        } else if (actionType === "all") {
+          await runAllRelayCommand(deviceId, value);
+        } else if (actionType === "release") {
+          const released = await api("/api/v1/devices/" + deviceId + "/release", {
+            method: "POST",
+            body: "{}"
+          });
+          log("Released. New claim code: " + released.claim_code);
+          await loadDevices();
+        }
+      } catch (error) {
+        log("Command failed: " + (error instanceof Error ? error.message : String(error)));
+      }
+    });
+
+    loginBtn.addEventListener("click", async () => {
+      try {
+        await runAuth("login");
+      } catch (error) {
+        log("Login failed: " + (error instanceof Error ? error.message : String(error)));
+      }
+    });
+
+    registerBtn.addEventListener("click", async () => {
+      try {
+        await runAuth("register");
+      } catch (error) {
+        log("Register failed: " + (error instanceof Error ? error.message : String(error)));
+      }
+    });
+
+    refreshBtn.addEventListener("click", async () => {
+      try {
+        await refreshToken();
+      } catch (error) {
+        log("Refresh failed: " + (error instanceof Error ? error.message : String(error)));
+      }
+    });
+
+    logoutBtn.addEventListener("click", async () => {
+      try {
+        await logout();
+      } catch (error) {
+        log("Logout failed: " + (error instanceof Error ? error.message : String(error)));
+      }
+    });
+
+    loadDevicesBtn.addEventListener("click", async () => {
+      try {
+        await loadDevices();
+      } catch (error) {
+        log("Load devices failed: " + (error instanceof Error ? error.message : String(error)));
+      }
+    });
+
+    claimBtn.addEventListener("click", async () => {
+      try {
+        await claimDevice();
+      } catch (error) {
+        log("Claim failed: " + (error instanceof Error ? error.message : String(error)));
+      }
+    });
+
+    wsConnectBtn.addEventListener("click", () => connectWs());
+    wsDisconnectBtn.addEventListener("click", () => disconnectWs());
+    clearLogBtn.addEventListener("click", () => { logEl.textContent = ""; });
+
+    renderDevices();
+    setAuthMeta();
+    log("Ready. Login then click Load Devices.");
+  </script>
+</body>
+</html>

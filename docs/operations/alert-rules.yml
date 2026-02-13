@@ -1,0 +1,29 @@
+groups:
+  - name: hexa-platform-alerts
+    rules:
+      - alert: HexaApi5xxSpike
+        expr: increase(hexa_api_errors_total{status_code=~"5.."}[5m]) > 10
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hexa API 5xx spike"
+          description: "API 5xx errors exceeded threshold in the last 5 minutes."
+
+      - alert: HexaCommandTimeoutSpike
+        expr: increase(hexa_command_total{result="timeout"}[5m]) > 5
+        for: 2m
+        labels:
+          severity: high
+        annotations:
+          summary: "Hexa command timeout spike"
+          description: "Device command timeouts exceeded threshold in the last 5 minutes."
+
+      - alert: HexaSchedulerErrorSpike
+        expr: increase(hexa_scheduler_tick_total{result="error"}[5m]) + increase(hexa_scheduler_execution_total{result="error"}[5m]) > 3
+        for: 2m
+        labels:
+          severity: high
+        annotations:
+          summary: "Hexa scheduler errors"
+          description: "Scheduler tick/execution errors exceeded threshold."

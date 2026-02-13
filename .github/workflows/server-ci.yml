@@ -1,0 +1,71 @@
+name: server-ci
+
+on:
+  push:
+    paths:
+      - "server/**"
+      - "webapp/**"
+      - "docs/**"
+      - ".github/workflows/server-ci.yml"
+  pull_request:
+    paths:
+      - "server/**"
+      - "webapp/**"
+      - "docs/**"
+      - ".github/workflows/server-ci.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: relay_platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d relay_platform"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    defaults:
+      run:
+        working-directory: server
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/relay_platform
+      DB_SSL: "false"
+      JWT_SECRET: ci-jwt-secret-ci-jwt-secret-ci-jwt-secret-1234
+      JWT_REFRESH_SECRET: ci-refresh-secret-ci-refresh-secret-ci-refresh-1234
+      BCRYPT_ROUNDS: "10"
+      DEVICE_PROVISION_KEY: ci-provision-key-1234567890
+      OTA_ALLOWED_HOSTS: ""
+      ALEXA_ENABLED: "false"
+      HOMEKIT_ENABLED: "false"
+      HA_MQTT_ENABLED: "false"
+      BACKUP_ENCRYPTION_KEY: ci-backup-encryption-key-32-byte-value
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run migrations
+        run: npm run migrate
+
+      - name: Run quality gates
+        run: npm run test:ci

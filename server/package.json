@@ -1,0 +1,50 @@
+{
+  "name": "relay-platform-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hexa relay control backend",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "lint": "npm run typecheck",
+    "typecheck": "tsc --noEmit",
+    "migrate": "tsx src/db/migrate.ts",
+    "migrate:smoke": "cross-env NODE_ENV=test DB_SSL=false DB_SSL_REJECT_UNAUTHORIZED=false ENFORCE_HTTPS=false TRUST_PROXY=false tsx scripts/migrate-smoke.ts",
+    "seed:dev": "tsx scripts/seed-dev.ts",
+    "backup:run": "tsx scripts/ops-backup.ts",
+    "restore:drill": "tsx scripts/ops-restore-drill.ts",
+    "validate:signoff": "tsx scripts/validate-staging-signoff.ts",
+    "test:unit": "cross-env NODE_ENV=test DB_SSL=false DB_SSL_REJECT_UNAUTHORIZED=false ENFORCE_HTTPS=false TRUST_PROXY=false tsx --test tests/unit/server.unit.test.ts",
+    "test:security": "cross-env NODE_ENV=production DB_SSL=false DB_SSL_REJECT_UNAUTHORIZED=false ENFORCE_HTTPS=true TRUST_PROXY=true tsx --test tests/unit/transport-security.unit.test.ts",
+    "test:integration": "cross-env NODE_ENV=test DB_SSL=false DB_SSL_REJECT_UNAUTHORIZED=false ENFORCE_HTTPS=false TRUST_PROXY=false tsx --test tests/integration/server.integration.test.ts tests/integration/api-surface.integration.test.ts",
+    "test:e2e": "cross-env NODE_ENV=test DB_SSL=false DB_SSL_REJECT_UNAUTHORIZED=false ENFORCE_HTTPS=false TRUST_PROXY=false tsx --test tests/e2e/smoke.e2e.test.ts",
+    "test:ci": "npm run lint && npm run migrate:smoke && npm run test:unit && npm run test:security && npm run test:integration && npm run test:e2e"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@fastify/jwt": "^9.1.0",
+    "bcrypt": "^6.0.0",
+    "cron-parser": "^5.5.0",
+    "dotenv": "^16.6.1",
+    "fastify": "^5.2.1",
+    "hap-nodejs": "^0.11.2",
+    "mqtt": "^5.15.0",
+    "pg": "^8.13.3",
+    "semver": "^7.7.4",
+    "ws": "^8.18.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/node": "^22.13.4",
+    "@types/pg": "^8.11.11",
+    "@types/semver": "^7.7.1",
+    "cross-env": "^10.1.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

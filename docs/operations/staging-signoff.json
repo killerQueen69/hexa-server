@@ -1,0 +1,8 @@
+{
+  "approved": true,
+  "approved_by": "ops-admin",
+  "approved_at": "2026-02-13T08:00:00.000Z",
+  "release_version": "1.0.0",
+  "checklist_ref": "docs/operations/staging-signoff.md",
+  "notes": "Set approved=true only after staging sign-off is complete."
+}
