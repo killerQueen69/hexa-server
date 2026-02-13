@@ -824,12 +824,37 @@
       log("Saved user preferences.");
     }
 
+    function summarizeHtmlError(rawText) {
+      const titleMatch = rawText.match(/<title>([^<]+)<\/title>/i);
+      const rayMatch = rawText.match(/Cloudflare Ray ID:\s*<strong[^>]*>([^<]+)<\/strong>/i);
+      const title = titleMatch ? titleMatch[1].replace(/\s+/g, " ").trim() : "";
+      const rayId = rayMatch ? rayMatch[1].trim() : "";
+
+      if (/cloudflare/i.test(rawText)) {
+        const titlePart = title || "Cloudflare gateway timeout";
+        const rayPart = rayId ? ` Ray ID: ${rayId}.` : "";
+        return `${titlePart}.${rayPart} Origin timed out or returned 504 (often device ACK timeout).`;
+      }
+
+      const compact = rawText
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return compact.slice(0, 240);
+    }
+
     function toApiError(response, body, rawText) {
       if (body && typeof body === "object" && body.message) {
         return new Error(`${body.code || "error"}: ${body.message}`);
       }
       if (rawText) {
-        return new Error(`HTTP ${response.status}: ${rawText}`);
+        const htmlLike = /^\s*<!doctype html/i.test(rawText) || /^\s*<html/i.test(rawText);
+        if (htmlLike) {
+          return new Error(`HTTP ${response.status}: ${summarizeHtmlError(rawText)}`);
+        }
+        return new Error(`HTTP ${response.status}: ${rawText.slice(0, 240)}`);
       }
       return new Error(`HTTP ${response.status}`);
     }
