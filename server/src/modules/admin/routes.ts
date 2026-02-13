@@ -31,14 +31,21 @@ type DeviceRow = {
   capabilities: unknown;
   relay_count: number;
   button_count: number;
+  relay_names: unknown;
+  input_config: unknown;
+  power_restore_mode: "last_state" | "all_off" | "all_on";
   firmware_version: string | null;
   ota_channel: "dev" | "beta" | "stable";
   ota_security_version: number;
   last_seen_at: Date | string | null;
+  last_ip: string | null;
   is_active: boolean;
   owner_user_id: string | null;
   owner_email: string | null;
   claim_code: string | null;
+  last_action_at: Date | string | null;
+  last_action: unknown;
+  last_input_event: unknown;
   created_at: Date | string;
   updated_at: Date | string;
   relays: unknown;
@@ -152,6 +159,13 @@ function asObject(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function asNullableObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
 function asRelayList(value: unknown): Array<{
   relay_index: number;
   relay_name: string | null;
@@ -238,14 +252,21 @@ function serializeDevice(row: DeviceRow) {
     capabilities: asCapabilities(row.capabilities),
     relay_count: row.relay_count,
     button_count: row.button_count,
+    relay_names: Array.isArray(row.relay_names) ? row.relay_names : [],
+    input_config: Array.isArray(row.input_config) ? row.input_config : [],
+    power_restore_mode: row.power_restore_mode,
     firmware_version: row.firmware_version,
     ota_channel: row.ota_channel,
     ota_security_version: row.ota_security_version,
     last_seen_at: toIso(row.last_seen_at),
+    last_ip: row.last_ip,
     is_active: row.is_active,
     owner_user_id: row.owner_user_id,
     owner_email: row.owner_email,
     claim_code: row.claim_code,
+    last_action_at: toIso(row.last_action_at),
+    last_action: asNullableObject(row.last_action),
+    last_input_event: asNullableObject(row.last_input_event),
     relays: asRelayList(row.relays),
     created_at: toIso(row.created_at),
     updated_at: toIso(row.updated_at)
@@ -292,13 +313,48 @@ async function listGlobalDevices(): Promise<DeviceRow[]> {
        d.capabilities,
        d.relay_count,
        d.button_count,
+       d.relay_names,
+       d.input_config,
+       d.power_restore_mode,
        d.firmware_version,
        d.ota_channel,
        d.ota_security_version,
        d.last_seen_at,
+       d.last_ip,
        d.is_active,
        d.owner_user_id,
        d.claim_code,
+       (
+         SELECT a.created_at
+         FROM audit_log a
+         WHERE a.device_id = d.id
+         ORDER BY a.created_at DESC
+         LIMIT 1
+       ) AS last_action_at,
+       (
+         SELECT json_build_object(
+           'action', a.action,
+           'source', a.source,
+           'created_at', a.created_at,
+           'details', a.details
+         )
+         FROM audit_log a
+         WHERE a.device_id = d.id
+         ORDER BY a.created_at DESC
+         LIMIT 1
+       ) AS last_action,
+       (
+         SELECT json_build_object(
+           'source', a.source,
+           'created_at', a.created_at,
+           'details', a.details
+         )
+         FROM audit_log a
+         WHERE a.device_id = d.id
+           AND a.action = 'input_event'
+         ORDER BY a.created_at DESC
+         LIMIT 1
+       ) AS last_input_event,
        d.created_at,
        d.updated_at,
        u.email AS owner_email,
@@ -623,13 +679,48 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
            d.capabilities,
            d.relay_count,
            d.button_count,
+           d.relay_names,
+           d.input_config,
+           d.power_restore_mode,
            d.firmware_version,
            d.ota_channel,
            d.ota_security_version,
            d.last_seen_at,
+           d.last_ip,
            d.is_active,
            d.owner_user_id,
            d.claim_code,
+           (
+             SELECT a.created_at
+             FROM audit_log a
+             WHERE a.device_id = d.id
+             ORDER BY a.created_at DESC
+             LIMIT 1
+           ) AS last_action_at,
+           (
+             SELECT json_build_object(
+               'action', a.action,
+               'source', a.source,
+               'created_at', a.created_at,
+               'details', a.details
+             )
+             FROM audit_log a
+             WHERE a.device_id = d.id
+             ORDER BY a.created_at DESC
+             LIMIT 1
+           ) AS last_action,
+           (
+             SELECT json_build_object(
+               'source', a.source,
+               'created_at', a.created_at,
+               'details', a.details
+             )
+             FROM audit_log a
+             WHERE a.device_id = d.id
+               AND a.action = 'input_event'
+             ORDER BY a.created_at DESC
+             LIMIT 1
+           ) AS last_input_event,
            d.created_at,
            d.updated_at,
            u.email AS owner_email,

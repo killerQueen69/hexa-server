@@ -54,6 +54,7 @@ This is the live HTTP contract for the current server implementation.
 ### `GET /dashboard`
 
 - Purpose: Serve operations dashboard UI.
+- Source file: `server/public/dashboard.html` (served by backend route).
 
 ### `GET /test-ui`
 

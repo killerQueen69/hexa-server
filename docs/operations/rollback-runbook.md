@@ -17,6 +17,14 @@
    - relay command path
    - OTA release listing
 
+### Git-based Rollback (this repo layout)
+
+If using the git checkout deployment model on Debian:
+
+1. `cd /opt/hexa/resltime`
+2. `git checkout <known-good-commit-or-tag>`
+3. `sudo /opt/hexa/resltime/server/scripts/ops-update-server.sh --skip-pull`
+
 ## Data Rollback / Recovery
 
 1. Identify latest encrypted backup before incident window.

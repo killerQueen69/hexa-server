@@ -127,6 +127,8 @@ Install on Debian:
    - discovery messages are created in HA
    - relay state updates publish to MQTT
    - HA command topic toggles relays successfully
+13. Make updater script executable:
+   - `chmod +x /opt/hexa/resltime/server/scripts/ops-update-server.sh`
 
 ## 10. Initial systemd Unit (server)
 
@@ -202,3 +204,20 @@ Route `admin.vistfiy.store` through `cloudflared` to local server and protect wi
 
 - For production domain wiring and tunnel commands, follow:
   - `docs/operations/cloudflare-vistfiy-setup.md`
+
+## 16. Routine Server Updates (Easier Path)
+
+Use the update helper script:
+
+```bash
+sudo /opt/hexa/resltime/server/scripts/ops-update-server.sh
+```
+
+For a faster run (skip unit tests):
+
+```bash
+sudo /opt/hexa/resltime/server/scripts/ops-update-server.sh --fast
+```
+
+Detailed procedure is documented in:
+- `docs/operations/server-update-runbook.md`

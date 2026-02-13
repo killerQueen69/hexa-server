@@ -106,6 +106,24 @@ function ackErrorCode(error: unknown): string {
   return "device_ack_failed";
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function waitForDeviceSession(deviceUid: string, attempts = 4, waitMs = 150): Promise<boolean> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (realtimeHub.getDevice(deviceUid)) {
+      return true;
+    }
+    if (attempt < attempts - 1) {
+      await sleep(waitMs);
+    }
+  }
+  return false;
+}
+
 async function persistRelayState(params: {
   deviceId: string;
   relayIndex: number;
@@ -212,7 +230,7 @@ class RelayService {
       throw new RelayServiceError(400, "invalid_relay_index", "Relay index out of range.");
     }
 
-    const online = realtimeHub.getDevice(device.device_uid);
+    const online = await waitForDeviceSession(device.device_uid);
     if (!online) {
       throw new RelayServiceError(409, "device_offline", "Device is offline.");
     }
@@ -225,14 +243,24 @@ class RelayService {
       params.timeoutMs ?? 5000
     );
 
-    const sent = realtimeHub.sendToDevice(device.device_uid, {
+    const relayCommand = {
       type: "set_relay",
       command_id: commandId,
       relay_index: params.relayIndex,
       action: params.action,
       ts: nowIso()
-    });
+    };
+
+    let sent = realtimeHub.sendToDevice(device.device_uid, relayCommand);
+    if (!sent && (await waitForDeviceSession(device.device_uid, 2, 120))) {
+      sent = realtimeHub.sendToDevice(device.device_uid, relayCommand);
+    }
+
     if (!sent) {
+      realtimeHub.resolveAck(commandId, {
+        ok: false,
+        error: "device_disconnected"
+      });
       throw new RelayServiceError(409, "device_offline", "Device is offline.");
     }
 
@@ -315,7 +343,7 @@ class RelayService {
 
   private async setAllRelaysInternal(params: SetAllRelaysParams): Promise<RelayResult> {
     const device = await getDeviceById(params.deviceId);
-    const online = realtimeHub.getDevice(device.device_uid);
+    const online = await waitForDeviceSession(device.device_uid);
     if (!online) {
       throw new RelayServiceError(409, "device_offline", "Device is offline.");
     }
@@ -327,13 +355,23 @@ class RelayService {
       params.timeoutMs ?? 5000
     );
 
-    const sent = realtimeHub.sendToDevice(device.device_uid, {
+    const allRelayCommand = {
       type: "set_all_relays",
       command_id: commandId,
       action: params.action,
       ts: nowIso()
-    });
+    };
+
+    let sent = realtimeHub.sendToDevice(device.device_uid, allRelayCommand);
+    if (!sent && (await waitForDeviceSession(device.device_uid, 2, 120))) {
+      sent = realtimeHub.sendToDevice(device.device_uid, allRelayCommand);
+    }
+
     if (!sent) {
+      realtimeHub.resolveAck(commandId, {
+        ok: false,
+        error: "device_disconnected"
+      });
       throw new RelayServiceError(409, "device_offline", "Device is offline.");
     }
 

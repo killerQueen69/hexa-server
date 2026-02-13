@@ -9,6 +9,7 @@ It surfaces:
 - Raw Prometheus metrics (`/metrics`)
 - Alert simulation (`/api/v1/admin/ops/alerts/simulate`)
 - Backup runs and restore-drill history
+- Device command controls plus recent action/input-event visibility
 
 ## Core Alert Rules
 

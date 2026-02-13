@@ -195,9 +195,16 @@ This covers saved dashboard layout, operator settings, and last-viewed device st
 The dashboard is a live operations console and uses real APIs (no mock placeholders) to manage:
 
 - auth + session refresh
+- automatic access-token refresh on API `401` using refresh token
+- persisted dashboard session + base URL/user context across page reloads
+- collapsible cards with persisted collapsed state
 - fleet overview KPIs
 - user role/activation updates
 - device relay operations and token rotation
+- device claim-by-code from dashboard user session
+- device delete action (admin)
+- richer device view (relay names, input config, power restore mode, last action, last input event)
+- online/stale heuristic using `last_seen_at` freshness
 - OTA signing keys and release signing lifecycle
 - backup/restore drill execution and history
 - alert simulation and raw metrics view

@@ -4,7 +4,6 @@ import { env } from "../../config/env";
 import { query, withTransaction } from "../../db/connection";
 import { sendApiError } from "../../http/api-error";
 import { newId, randomClaimCode, randomToken, sha256 } from "../../utils/crypto";
-import { nowIso } from "../../utils/time";
 
 type DeviceProvisionRow = {
   id: string;
@@ -121,7 +120,7 @@ export async function provisionRoutes(server: FastifyInstance): Promise<void> {
     );
     const rawToken = randomToken(32);
     const tokenHash = sha256(rawToken);
-    const now = nowIso();
+    const now = new Date();
 
     const provisioned = await withTransaction(async (client) => {
       const existing = await client.query<DeviceProvisionRow>(

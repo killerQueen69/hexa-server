@@ -1,0 +1,1567 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hexa Admin Dashboard</title>
+  <style>
+    :root {
+      --bg: #f3f4ef;
+      --surface: #ffffff;
+      --surface-alt: #f7f8f2;
+      --line: #d7dbcf;
+      --ink: #182016;
+      --muted: #566353;
+      --brand: #1f7a4f;
+      --brand-strong: #145838;
+      --danger: #b53a2f;
+      --warn: #9e6f1a;
+      --ok: #0f7b44;
+      --shadow: 0 14px 32px rgba(18, 24, 15, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", Tahoma, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 500px at 100% -200px, #d9ecdf 0%, transparent 70%),
+        radial-gradient(1000px 420px at -200px -220px, #f2ebd4 0%, transparent 70%),
+        var(--bg);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .layout {
+      max-width: 1500px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 340px minmax(0, 1fr);
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+
+    .stack { display: grid; gap: 12px; }
+
+    h1 {
+      margin: 0;
+      font-size: 26px;
+      letter-spacing: 0.2px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: 0.15px;
+    }
+
+    .meta {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .muted { color: var(--muted); }
+
+    label {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    input, textarea, select, button {
+      font: inherit;
+    }
+
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: #fcfdf9;
+      color: var(--ink);
+    }
+
+    textarea { min-height: 64px; resize: vertical; }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 8px 11px;
+      color: #fff;
+      cursor: pointer;
+      background: var(--brand);
+    }
+
+    button:hover { background: var(--brand-strong); }
+    button.secondary { background: #3a5a49; }
+    button.warn { background: var(--warn); }
+    button.danger { background: var(--danger); }
+    button.ghost {
+      background: transparent;
+      color: var(--ink);
+      border-color: var(--line);
+    }
+
+    button.collapse-toggle {
+      background: transparent;
+      color: var(--muted);
+      border-color: var(--line);
+      padding: 4px 8px;
+      font-size: 11px;
+    }
+
+    button.collapse-toggle:hover {
+      background: #eef2e7;
+      color: var(--ink);
+    }
+
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 8px;
+    }
+
+    .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .kpi-grid {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .kpi {
+      background: var(--surface-alt);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+    }
+
+    .kpi .label {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
+    .kpi .value {
+      margin-top: 6px;
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .section-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .panel {
+      display: grid;
+      gap: 12px;
+    }
+
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 680px;
+      font-size: 13px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 8px;
+      border-bottom: 1px solid #e8ebe2;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f4f7ef;
+      color: #2f3f31;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    .pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.25px;
+      border: 1px solid var(--line);
+      background: #edf1e8;
+      color: #2f3d2f;
+    }
+
+    .pill.ok { background: #dcf4e8; color: #0d6538; border-color: #c1e9d4; }
+    .pill.warn { background: #f8eddb; color: #7e5712; border-color: #efd7b0; }
+    .pill.bad { background: #f7e2df; color: #8a2d26; border-color: #efcbc6; }
+
+    .code {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      word-break: break-all;
+    }
+
+    .log {
+      min-height: 180px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0f1711;
+      color: #d9efde;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      padding: 10px;
+      white-space: pre-wrap;
+      overflow: auto;
+    }
+
+    .main-scroll {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .card.is-collapsed {
+      padding-bottom: 12px;
+    }
+
+    .device-config {
+      display: grid;
+      gap: 4px;
+      min-width: 250px;
+      font-size: 12px;
+    }
+
+    .device-event {
+      display: grid;
+      gap: 4px;
+      min-width: 220px;
+      font-size: 12px;
+    }
+
+    @media (max-width: 1300px) {
+      .layout { grid-template-columns: 1fr; }
+      .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid.cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 760px) {
+      body { padding: 12px; }
+      .grid.cols-2,
+      .grid.cols-3,
+      .kpi-grid { grid-template-columns: 1fr; }
+      table { min-width: 560px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="stack">
+      <div class="card stack" data-card-id="about">
+        <h1>Hexa Admin</h1>
+        <div class="meta">Operations dashboard for runtime control, OTA, backups, and audit maintenance.</div>
+        <div id="authState" class="pill">Not Authenticated</div>
+      </div>
+
+      <div class="card stack" data-card-id="connection">
+        <h2>Connection</h2>
+        <div>
+          <label for="baseUrl">Server Base URL</label>
+          <input id="baseUrl" />
+        </div>
+        <div>
+          <label for="email">Email</label>
+          <input id="email" type="email" />
+        </div>
+        <div>
+          <label for="password">Password</label>
+          <input id="password" type="password" />
+        </div>
+        <div class="row">
+          <button id="loginBtn">Login</button>
+          <button id="registerBtn" class="secondary">Register</button>
+          <button id="refreshBtn" class="ghost">Refresh</button>
+          <button id="logoutBtn" class="danger">Logout</button>
+        </div>
+        <div class="row">
+          <button id="loadPrefsBtn" class="ghost">Load Prefs</button>
+          <button id="savePrefsBtn" class="secondary">Save Prefs</button>
+        </div>
+        <div id="tokenView" class="code muted"></div>
+      </div>
+
+      <div class="card stack" data-card-id="ops-controls">
+        <h2>Ops Controls</h2>
+        <div class="row">
+          <button id="reloadAllBtn">Reload Dashboard</button>
+          <button id="loadMetricsBtn" class="secondary">Load /metrics</button>
+        </div>
+        <div class="row">
+          <button id="runBackupBtn" class="warn">Run Encrypted Backup</button>
+          <button id="runRestoreDrillBtn" class="warn">Run Restore Drill</button>
+        </div>
+        <div>
+          <label for="restorePath">Restore Drill Backup Path (optional)</label>
+          <input id="restorePath" placeholder="absolute-or-relative-path" />
+        </div>
+        <div class="row">
+          <button id="simulateAlertsBtn" class="danger">Simulate Alerts</button>
+          <button id="clearLogBtn" class="ghost">Clear Log</button>
+        </div>
+      </div>
+
+      <div class="card stack" data-card-id="activity-log">
+        <h2>Activity Log</h2>
+        <div id="log" class="log"></div>
+      </div>
+    </aside>
+
+    <main class="main-scroll">
+      <section class="card panel" data-card-id="overview">
+        <div class="section-title">
+          <h2>Overview</h2>
+          <div id="generatedAt" class="meta"></div>
+        </div>
+        <div id="kpis" class="kpi-grid"></div>
+        <div id="overviewMeta" class="meta"></div>
+      </section>
+
+      <section class="card panel" data-card-id="users">
+        <div class="section-title">
+          <h2>Users</h2>
+          <div class="meta">Role and activation maintenance</div>
+        </div>
+        <div id="usersTable" class="table-wrap"></div>
+      </section>
+
+      <section class="card panel" data-card-id="devices">
+        <div class="section-title">
+          <h2>Devices</h2>
+          <div class="meta">Relay controls, ownership, token rotation</div>
+        </div>
+        <div class="row">
+          <input id="claimCodeInput" placeholder="claim code (current logged user)" style="max-width: 250px;" />
+          <button id="claimDeviceBtn" class="secondary">Claim By Code</button>
+          <button id="refreshDevicesBtn" class="ghost">Refresh Devices</button>
+        </div>
+        <div id="devicesTable" class="table-wrap"></div>
+      </section>
+
+      <section class="card panel" data-card-id="ota-keys">
+        <div class="section-title">
+          <h2>OTA Signing Keys</h2>
+          <div class="row">
+            <button id="rotateSigningKeysBtn" class="secondary">Rotate Active/Next</button>
+          </div>
+        </div>
+        <div class="grid cols-2">
+          <div>
+            <label for="signingKeyId">Key ID</label>
+            <input id="signingKeyId" placeholder="ota-key-2026-q1" />
+          </div>
+          <div>
+            <label for="signingKeyStatus">Status</label>
+            <select id="signingKeyStatus">
+              <option value="retired">retired</option>
+              <option value="next">next</option>
+              <option value="active">active</option>
+            </select>
+          </div>
+          <div>
+            <label for="signingSecretRef">Private Key Secret Ref</label>
+            <input id="signingSecretRef" placeholder="env:OTA_ACTIVE_PRIVATE_KEY" />
+          </div>
+          <div class="row" style="align-items: end;">
+            <button id="createSigningKeyBtn">Create Signing Key</button>
+          </div>
+        </div>
+        <div>
+          <label for="signingPublicPem">Public Key PEM</label>
+          <textarea id="signingPublicPem" placeholder="-----BEGIN PUBLIC KEY-----"></textarea>
+        </div>
+        <div id="signingKeysTable" class="table-wrap"></div>
+      </section>
+
+      <section class="card panel" data-card-id="ota-releases">
+        <div class="section-title">
+          <h2>OTA Releases</h2>
+          <div class="meta">Signed manifest registry with anti-rollback security_version</div>
+        </div>
+        <div class="grid cols-3">
+          <div>
+            <label for="releaseModel">Model</label>
+            <input id="releaseModel" value="hexa-mini-switch-v1" />
+          </div>
+          <div>
+            <label for="releaseVersion">Version</label>
+            <input id="releaseVersion" placeholder="1.2.3" />
+          </div>
+          <div>
+            <label for="releaseSecurityVersion">Security Version</label>
+            <input id="releaseSecurityVersion" type="number" min="0" value="1" />
+          </div>
+          <div>
+            <label for="releaseChannel">Channel</label>
+            <select id="releaseChannel">
+              <option value="stable">stable</option>
+              <option value="beta">beta</option>
+              <option value="dev">dev</option>
+            </select>
+          </div>
+          <div>
+            <label for="releaseUrl">Artifact URL</label>
+            <input id="releaseUrl" placeholder="https://updates.example.com/fw.bin" />
+          </div>
+          <div>
+            <label for="releaseSizeBytes">Size Bytes</label>
+            <input id="releaseSizeBytes" type="number" min="1" value="100000" />
+          </div>
+          <div>
+            <label for="releaseSha">SHA-256</label>
+            <input id="releaseSha" class="code" />
+          </div>
+          <div>
+            <label for="releaseExpiresAt">Expires At (UTC ISO)</label>
+            <input id="releaseExpiresAt" />
+          </div>
+          <div class="row" style="align-items: end;">
+            <button id="createReleaseBtn">Create Signed Release</button>
+          </div>
+        </div>
+        <div id="releasesTable" class="table-wrap"></div>
+      </section>
+
+      <section class="card panel" data-card-id="backup-runs">
+        <div class="section-title">
+          <h2>Backup Runs</h2>
+          <div class="meta">Encrypted retention and restore drill tracking</div>
+        </div>
+        <div id="backupPolicy" class="meta"></div>
+        <div id="backupRunsTable" class="table-wrap"></div>
+      </section>
+
+      <section class="card panel" data-card-id="audit-log">
+        <div class="section-title">
+          <h2>Audit Log</h2>
+          <div class="row">
+            <input id="auditFilterSource" placeholder="source filter" style="width: 170px;" />
+            <input id="auditFilterAction" placeholder="action filter" style="width: 170px;" />
+            <button id="loadAuditBtn" class="ghost">Reload Audit</button>
+          </div>
+        </div>
+        <div id="auditTable" class="table-wrap"></div>
+      </section>
+
+      <section class="card panel" data-card-id="raw-metrics">
+        <div class="section-title">
+          <h2>Raw Metrics</h2>
+          <div class="meta">Prometheus exposition</div>
+        </div>
+        <pre id="metricsOutput" class="log"></pre>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const SESSION_STORAGE_KEY = "hexa_admin_dashboard_session_v2";
+    const COLLAPSE_STORAGE_KEY = "hexa_admin_dashboard_collapsed_v1";
+
+    const state = {
+      accessToken: "",
+      refreshToken: "",
+      user: null,
+      releases: [],
+      users: [],
+      devices: [],
+      preferences: null,
+      refreshPromise: null,
+      collapsedCards: {}
+    };
+
+    $("baseUrl").value = window.location.origin;
+    $("releaseExpiresAt").value = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    function nowTs() {
+      return new Date().toISOString().slice(11, 19);
+    }
+
+    function log(line) {
+      const el = $("log");
+      el.textContent += `[${nowTs()}] ${line}\n`;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function baseUrl() {
+      return ($("baseUrl").value || "").trim().replace(/\/+$/, "");
+    }
+
+    function safeParseJson(text, fallback) {
+      if (!text) {
+        return fallback;
+      }
+      try {
+        return JSON.parse(text);
+      } catch {
+        return fallback;
+      }
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function parseIsoMs(value) {
+      if (typeof value !== "string" || !value.trim()) {
+        return null;
+      }
+      const ms = new Date(value).getTime();
+      return Number.isNaN(ms) ? null : ms;
+    }
+
+    function ageLabel(iso) {
+      const ms = parseIsoMs(iso);
+      if (ms === null) {
+        return "-";
+      }
+      const ageSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+      if (ageSec < 60) {
+        return `${ageSec}s ago`;
+      }
+      const ageMin = Math.floor(ageSec / 60);
+      if (ageMin < 60) {
+        return `${ageMin}m ago`;
+      }
+      const ageHr = Math.floor(ageMin / 60);
+      if (ageHr < 24) {
+        return `${ageHr}h ago`;
+      }
+      return `${Math.floor(ageHr / 24)}d ago`;
+    }
+
+    function isLikelyOnline(lastSeenAt) {
+      const ms = parseIsoMs(lastSeenAt);
+      if (ms === null) {
+        return false;
+      }
+      return Date.now() - ms <= 90_000;
+    }
+
+    function persistCollapsedCards() {
+      localStorage.setItem(COLLAPSE_STORAGE_KEY, JSON.stringify(state.collapsedCards || {}));
+    }
+
+    function loadCollapsedCards() {
+      const stored = safeParseJson(localStorage.getItem(COLLAPSE_STORAGE_KEY), {});
+      if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+        state.collapsedCards = stored;
+      }
+    }
+
+    function persistSession() {
+      const snapshot = {
+        base_url: baseUrl(),
+        email: $("email").value.trim(),
+        user: state.user,
+        access_token: state.accessToken,
+        refresh_token: state.refreshToken
+      };
+      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(snapshot));
+    }
+
+    function clearSession() {
+      state.user = null;
+      state.accessToken = "";
+      state.refreshToken = "";
+      state.preferences = null;
+      persistSession();
+    }
+
+    function restoreSession() {
+      const snapshot = safeParseJson(localStorage.getItem(SESSION_STORAGE_KEY), null);
+      if (!snapshot || typeof snapshot !== "object") {
+        return;
+      }
+      if (typeof snapshot.base_url === "string" && snapshot.base_url.trim()) {
+        $("baseUrl").value = snapshot.base_url.trim();
+      }
+      if (typeof snapshot.email === "string" && snapshot.email.trim()) {
+        $("email").value = snapshot.email.trim();
+      }
+      if (typeof snapshot.access_token === "string") {
+        state.accessToken = snapshot.access_token;
+      }
+      if (typeof snapshot.refresh_token === "string") {
+        state.refreshToken = snapshot.refresh_token;
+      }
+      if (snapshot.user && typeof snapshot.user === "object") {
+        state.user = snapshot.user;
+      }
+    }
+
+    function findDirectHeader(card) {
+      for (const child of card.children) {
+        if (child.classList && child.classList.contains("section-title")) {
+          return child;
+        }
+      }
+      return null;
+    }
+
+    function ensureCardHeader(card) {
+      let header = findDirectHeader(card);
+      if (header) {
+        return header;
+      }
+
+      let title = null;
+      for (const child of card.children) {
+        if (child.tagName === "H1" || child.tagName === "H2") {
+          title = child;
+          break;
+        }
+      }
+      if (!title) {
+        return null;
+      }
+
+      header = document.createElement("div");
+      header.className = "section-title";
+      card.insertBefore(header, title);
+      header.appendChild(title);
+      return header;
+    }
+
+    function applyCardCollapsed(card, collapsed) {
+      const header = findDirectHeader(card);
+      for (const child of card.children) {
+        if (child === header) {
+          continue;
+        }
+        child.hidden = collapsed;
+      }
+      card.classList.toggle("is-collapsed", collapsed);
+      const toggle = header ? header.querySelector(".collapse-toggle") : null;
+      if (toggle) {
+        toggle.textContent = collapsed ? "Expand" : "Collapse";
+      }
+    }
+
+    function applyCollapseToAllCards() {
+      document.querySelectorAll(".card").forEach((card, idx) => {
+        const cardId = card.getAttribute("data-card-id") || `card-${idx + 1}`;
+        applyCardCollapsed(card, Boolean(state.collapsedCards[cardId]));
+      });
+    }
+
+    function setupCollapsibleCards() {
+      document.querySelectorAll(".card").forEach((card, idx) => {
+        const cardId = card.getAttribute("data-card-id") || `card-${idx + 1}`;
+        const header = ensureCardHeader(card);
+        if (!header) {
+          return;
+        }
+
+        let toggle = header.querySelector(".collapse-toggle");
+        if (!toggle) {
+          toggle = document.createElement("button");
+          toggle.type = "button";
+          toggle.className = "collapse-toggle";
+          toggle.addEventListener("click", () => {
+            const nextCollapsed = !Boolean(state.collapsedCards[cardId]);
+            state.collapsedCards[cardId] = nextCollapsed;
+            persistCollapsedCards();
+            applyCardCollapsed(card, nextCollapsed);
+          });
+          header.appendChild(toggle);
+        }
+
+        applyCardCollapsed(card, Boolean(state.collapsedCards[cardId]));
+      });
+    }
+
+    function setAuthState() {
+      const badge = $("authState");
+      if (!state.user) {
+        badge.textContent = "Not Authenticated";
+        badge.className = "pill";
+        $("tokenView").textContent = "";
+        return;
+      }
+      badge.textContent = `${state.user.email} (${state.user.role})`;
+      badge.className = "pill ok";
+      const tokenTail = state.accessToken ? state.accessToken.slice(-16) : "";
+      $("tokenView").textContent = tokenTail
+        ? `access_token: ...${tokenTail} | refresh loaded: ${state.refreshToken ? "yes" : "no"}`
+        : "refresh loaded: yes";
+    }
+
+    function buildDeviceViewState() {
+      const view = {};
+      for (const device of state.devices) {
+        if (!device || !device.device_uid) continue;
+        view[device.device_uid] = {
+          last_seen_at: device.last_seen_at || null,
+          is_active: Boolean(device.is_active),
+          relays: Array.isArray(device.relays)
+            ? device.relays.map((relay) => ({
+                relay_index: relay.relay_index,
+                is_on: relay.is_on
+              }))
+            : []
+        };
+      }
+      return view;
+    }
+
+    function applyPreferences(prefs) {
+      if (!prefs || typeof prefs !== "object") return;
+      const settings = prefs.dashboard_settings || {};
+      if (typeof settings.base_url === "string" && settings.base_url.trim()) {
+        $("baseUrl").value = settings.base_url.trim();
+      }
+      if (typeof settings.last_email === "string" && settings.last_email.trim()) {
+        $("email").value = settings.last_email.trim();
+      }
+      if (typeof settings.audit_source_filter === "string") {
+        $("auditFilterSource").value = settings.audit_source_filter;
+      }
+      if (typeof settings.audit_action_filter === "string") {
+        $("auditFilterAction").value = settings.audit_action_filter;
+      }
+      if (typeof settings.restore_path === "string") {
+        $("restorePath").value = settings.restore_path;
+      }
+      if (typeof settings.release_model === "string" && settings.release_model.trim()) {
+        $("releaseModel").value = settings.release_model.trim();
+      }
+      if (typeof settings.release_channel === "string" && settings.release_channel.trim()) {
+        $("releaseChannel").value = settings.release_channel.trim();
+      }
+      if (
+        settings.collapsed_cards &&
+        typeof settings.collapsed_cards === "object" &&
+        !Array.isArray(settings.collapsed_cards)
+      ) {
+        state.collapsedCards = {
+          ...state.collapsedCards,
+          ...settings.collapsed_cards
+        };
+        persistCollapsedCards();
+        applyCollapseToAllCards();
+      }
+    }
+
+    async function loadPreferences() {
+      const prefs = await api("/api/v1/preferences", { method: "GET" });
+      state.preferences = prefs;
+      applyPreferences(prefs);
+      persistSession();
+      log("Loaded user preferences.");
+    }
+
+    async function savePreferences() {
+      const payload = {
+        merge: true,
+        dashboard_layout: {
+          pinned_sections: ["overview", "users", "devices", "ota", "backup", "audit", "metrics"]
+        },
+        dashboard_settings: {
+          base_url: baseUrl(),
+          last_email: $("email").value.trim(),
+          audit_source_filter: $("auditFilterSource").value || "",
+          audit_action_filter: $("auditFilterAction").value || "",
+          restore_path: $("restorePath").value || "",
+          release_model: $("releaseModel").value || "",
+          release_channel: $("releaseChannel").value || "stable",
+          collapsed_cards: state.collapsedCards
+        },
+        device_view_state: buildDeviceViewState(),
+        notification_settings: {
+          alert_simulation_enabled: true
+        }
+      };
+      const saved = await api("/api/v1/preferences", {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      });
+      state.preferences = saved;
+      persistSession();
+      log("Saved user preferences.");
+    }
+
+    function toApiError(response, body, rawText) {
+      if (body && typeof body === "object" && body.message) {
+        return new Error(`${body.code || "error"}: ${body.message}`);
+      }
+      if (rawText) {
+        return new Error(`HTTP ${response.status}: ${rawText}`);
+      }
+      return new Error(`HTTP ${response.status}`);
+    }
+
+    async function rawRequest(path, options = {}, authToken = "") {
+      const headers = {
+        ...(options.headers || {})
+      };
+      const hasBody = Object.prototype.hasOwnProperty.call(options, "body");
+      if (hasBody && !headers["content-type"] && !headers["Content-Type"]) {
+        headers["content-type"] = "application/json";
+      }
+      if (authToken) {
+        headers.authorization = `Bearer ${authToken}`;
+      }
+
+      const response = await fetch(baseUrl() + path, {
+        ...options,
+        headers
+      });
+      const text = await response.text();
+      const body = safeParseJson(text, {});
+      return { response, body, text };
+    }
+
+    async function refreshAccessToken() {
+      if (!state.refreshToken) {
+        throw new Error("No refresh token loaded.");
+      }
+      if (state.refreshPromise) {
+        return state.refreshPromise;
+      }
+
+      state.refreshPromise = (async () => {
+        const { response, body, text } = await rawRequest("/api/v1/auth/refresh", {
+          method: "POST",
+          body: JSON.stringify({ refresh_token: state.refreshToken })
+        });
+
+        if (!response.ok) {
+          throw toApiError(response, body, text);
+        }
+
+        if (!body.access_token) {
+          throw new Error("refresh_failed: Missing access_token.");
+        }
+
+        state.accessToken = body.access_token;
+        state.refreshToken = body.refresh_token || state.refreshToken;
+        setAuthState();
+        persistSession();
+        log("Access token refreshed.");
+      })();
+
+      try {
+        await state.refreshPromise;
+      } finally {
+        state.refreshPromise = null;
+      }
+    }
+
+    async function api(path, options = {}, allowRetry = true) {
+      const first = await rawRequest(path, options, state.accessToken);
+      if (first.response.ok) {
+        return first.body;
+      }
+
+      const isAuthPath = path.startsWith("/api/v1/auth/");
+      const canRetry =
+        allowRetry &&
+        first.response.status === 401 &&
+        Boolean(state.refreshToken) &&
+        !isAuthPath;
+
+      if (canRetry) {
+        try {
+          await refreshAccessToken();
+          const retry = await rawRequest(path, options, state.accessToken);
+          if (!retry.response.ok) {
+            throw toApiError(retry.response, retry.body, retry.text);
+          }
+          return retry.body;
+        } catch (error) {
+          clearSession();
+          setAuthState();
+          throw error instanceof Error
+            ? error
+            : new Error("unauthorized: Authentication required.");
+        }
+      }
+
+      throw toApiError(first.response, first.body, first.text);
+    }
+
+    function renderKpis(overview) {
+      const devices = overview.fleet?.devices || {};
+      const users = overview.fleet?.users || {};
+      const schedules = overview.schedules || {};
+      const ota = overview.ota || {};
+
+      const cards = [
+        ["Devices Total", devices.total || 0],
+        ["Devices Online", devices.online_estimate || 0],
+        ["Users Active", users.active || 0],
+        ["Schedules Enabled", schedules.enabled || 0],
+        ["OTA Active Releases", ota.active_releases || 0],
+        ["OTA Failed Reports 24h", ota.failed_reports_24h || 0],
+        ["Claimed Devices", devices.claimed || 0],
+        ["Unclaimed Devices", devices.unclaimed || 0]
+      ];
+
+      $("kpis").innerHTML = cards.map(([label, value]) =>
+        `<div class="kpi"><div class="label">${label}</div><div class="value">${value}</div></div>`
+      ).join("");
+      $("generatedAt").textContent = `Generated ${overview.generated_at || ""}`;
+      $("overviewMeta").textContent = `REST ${overview.api_versions?.rest || "v1"} | WS ${overview.api_versions?.ws || "v1"} | Deprecation window ${overview.api_versions?.deprecation_window_days || 0} days`;
+      const policy = overview.backup?.policy || {};
+      $("backupPolicy").textContent = `Backup dir: ${policy.output_dir || ""} | retention: ${policy.retention_count || 0} | encrypted: ${policy.encryption_configured ? "yes" : "no"} | RPO: ${policy.rpo_minutes || 0} min | RTO: ${policy.rto_minutes || 0} min`;
+    }
+
+    function renderUsers(users) {
+      const rows = users.map((u) => `
+        <tr>
+          <td>${escapeHtml(u.email)}</td>
+          <td><input data-user-name="${escapeHtml(u.id)}" value="${escapeHtml(u.name || "")}" /></td>
+          <td>
+            <select data-user-role="${escapeHtml(u.id)}">
+              <option value="user" ${u.role === "user" ? "selected" : ""}>user</option>
+              <option value="admin" ${u.role === "admin" ? "selected" : ""}>admin</option>
+            </select>
+          </td>
+          <td>${escapeHtml(u.device_count)}</td>
+          <td><input type="checkbox" data-user-active="${escapeHtml(u.id)}" ${u.is_active ? "checked" : ""} /></td>
+          <td><button data-user-save="${escapeHtml(u.id)}">Save</button></td>
+        </tr>
+      `).join("");
+
+      $("usersTable").innerHTML = `
+        <table>
+          <thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Devices</th><th>Active</th><th>Action</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
+    function describeInputConfigRow(row) {
+      if (!row || typeof row !== "object") {
+        return "-";
+      }
+      const inputIdx = Number.isInteger(row.input_index) ? `B${row.input_index}` : "B?";
+      const inputType = typeof row.input_type === "string" ? row.input_type : "unknown";
+      const invert = row.invert_input === true ? "invert" : "";
+      const hold = Number.isInteger(row.hold_seconds) ? `hold:${row.hold_seconds}s` : "";
+      const rocker = typeof row.rocker_mode === "string" ? row.rocker_mode : "";
+
+      if (row.linked !== true) {
+        const extras = [invert, hold, rocker].filter(Boolean).join(" ");
+        return extras ? `${inputIdx} ${inputType} (unlinked, ${extras})` : `${inputIdx} ${inputType} (unlinked)`;
+      }
+
+      const targetRelay = Number.isInteger(row.target_relay_index) ? `R${row.target_relay_index}` : "R?";
+      const linkedExtras = [invert, hold, rocker].filter(Boolean).join(" ");
+      return linkedExtras
+        ? `${inputIdx} ${inputType} -> ${targetRelay} (${linkedExtras})`
+        : `${inputIdx} ${inputType} -> ${targetRelay}`;
+    }
+
+    function summarizeLastAction(device) {
+      const action = device && device.last_action && typeof device.last_action === "object" ? device.last_action : null;
+      if (!action) {
+        return "-";
+      }
+      const actionName = typeof action.action === "string" ? action.action : "unknown";
+      const source = typeof action.source === "string" ? action.source : "n/a";
+      const at = typeof action.created_at === "string" ? action.created_at : "";
+      const details = action.details && typeof action.details === "object" ? action.details : {};
+      const relayPart = Number.isInteger(details.relay_index) ? ` r${details.relay_index}` : "";
+      const commandPart = typeof details.action === "string" ? ` ${details.action}` : "";
+      const suffix = [relayPart, commandPart].join("").trim();
+      return `${actionName}${suffix ? ` (${suffix})` : ""} [${source}] ${at}`.trim();
+    }
+
+    function summarizeLastInputEvent(device) {
+      const inputEvent = device && device.last_input_event && typeof device.last_input_event === "object"
+        ? device.last_input_event
+        : null;
+      if (!inputEvent) {
+        return "-";
+      }
+      const details = inputEvent.details && typeof inputEvent.details === "object" ? inputEvent.details : {};
+      const idx = Number.isInteger(details.input_index) ? `B${details.input_index}` : "B?";
+      const eventName = typeof details.event === "string" ? details.event : "event";
+      const duration = Number.isFinite(Number(details.duration_ms)) ? `${Number(details.duration_ms)}ms` : "";
+      const at = typeof inputEvent.created_at === "string" ? inputEvent.created_at : "";
+      return `${idx} ${eventName}${duration ? ` (${duration})` : ""} ${at}`.trim();
+    }
+
+    function renderDevices(devices) {
+      const rows = devices.map((d) => {
+        const relayNames = Array.isArray(d.relay_names) ? d.relay_names : [];
+        const relayBtns = (Array.isArray(d.relays) ? d.relays : []).map((r) => {
+          const relayName = typeof relayNames[r.relay_index] === "string"
+            ? relayNames[r.relay_index]
+            : `Relay ${Number(r.relay_index) + 1}`;
+          return `
+            <div class="row" style="margin-bottom:4px;">
+              <span class="pill ${r.is_on ? "ok" : "warn"}">R${escapeHtml(r.relay_index)}:${r.is_on ? "ON" : "OFF"}</span>
+              <span class="meta">${escapeHtml(relayName)}</span>
+              <button data-relay="${escapeHtml(d.id)}:${escapeHtml(r.relay_index)}:on">On</button>
+              <button data-relay="${escapeHtml(d.id)}:${escapeHtml(r.relay_index)}:off" class="secondary">Off</button>
+              <button data-relay="${escapeHtml(d.id)}:${escapeHtml(r.relay_index)}:toggle" class="warn">Toggle</button>
+            </div>
+          `;
+        }).join("");
+
+        const inputRows = (Array.isArray(d.input_config) ? d.input_config : [])
+          .slice()
+          .sort((a, b) => Number(a?.input_index ?? 0) - Number(b?.input_index ?? 0))
+          .map((row) => `<div>${escapeHtml(describeInputConfigRow(row))}</div>`)
+          .join("");
+
+        const online = Boolean(d.is_active) && isLikelyOnline(d.last_seen_at);
+        const statusBadge = !d.is_active
+          ? '<span class="pill bad">inactive</span>'
+          : online
+            ? '<span class="pill ok">online</span>'
+            : '<span class="pill warn">stale/offline</span>';
+
+        return `
+          <tr>
+            <td>
+              <div><strong>${escapeHtml(d.name)}</strong></div>
+              <div class="meta code">${escapeHtml(d.device_uid)}</div>
+              <div class="meta">model: ${escapeHtml(d.model || "-")} | class: ${escapeHtml(d.device_class || "-")}</div>
+            </td>
+            <td>
+              <div>${escapeHtml(d.owner_email || "unclaimed")}</div>
+              <div class="meta code">owner_id: ${escapeHtml(d.owner_user_id || "-")}</div>
+              <div class="meta code">claim_code: ${escapeHtml(d.claim_code || "-")}</div>
+            </td>
+            <td>
+              <div>fw: ${escapeHtml(d.firmware_version || "-")}</div>
+              <div class="meta">ota: ${escapeHtml(d.ota_channel)}/${escapeHtml(d.ota_security_version)}</div>
+            </td>
+            <td>
+              <div>${statusBadge}</div>
+              <div class="meta">last_seen: ${escapeHtml(d.last_seen_at || "-")}</div>
+              <div class="meta">age: ${escapeHtml(ageLabel(d.last_seen_at))}</div>
+              <div class="meta">ip: ${escapeHtml(d.last_ip || "-")}</div>
+            </td>
+            <td class="device-config">
+              <div class="meta">relays: ${escapeHtml(d.relay_count)} | buttons: ${escapeHtml(d.button_count)}</div>
+              <div class="meta">power_restore: ${escapeHtml(d.power_restore_mode || "-")}</div>
+              ${inputRows || '<div class="muted">no input config</div>'}
+            </td>
+            <td class="device-event">
+              <div><strong>Last action</strong></div>
+              <div>${escapeHtml(summarizeLastAction(d))}</div>
+              <div><strong>Last input</strong></div>
+              <div>${escapeHtml(summarizeLastInputEvent(d))}</div>
+            </td>
+            <td>
+              ${relayBtns}
+              <div class="row" style="margin-top:6px;">
+                <button data-relay-all="${escapeHtml(d.id)}:on">All ON</button>
+                <button data-relay-all="${escapeHtml(d.id)}:off" class="secondary">All OFF</button>
+                <button data-rotate-token="${escapeHtml(d.id)}" class="warn">Rotate Token</button>
+                <button data-release-device="${escapeHtml(d.id)}" class="danger">Release</button>
+                <button data-delete-device="${escapeHtml(d.id)}" class="danger">Delete</button>
+              </div>
+              ${d.claim_code ? `<div class="row" style="margin-top:6px;"><button data-claim-code="${escapeHtml(d.claim_code)}" class="secondary">Claim This Code</button></div>` : ""}
+            </td>
+          </tr>
+        `;
+      }).join("");
+
+      $("devicesTable").innerHTML = `
+        <table>
+          <thead><tr><th>Device</th><th>Ownership</th><th>Firmware</th><th>Connectivity</th><th>I/O Config</th><th>Recent Device Events</th><th>Actions</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
+    function renderSigningKeys(keys) {
+      $("signingKeysTable").innerHTML = `
+        <table>
+          <thead><tr><th>Key ID</th><th>Status</th><th>Created</th><th>Rotated</th></tr></thead>
+          <tbody>
+            ${keys.map((k) => `<tr><td class="code">${k.key_id}</td><td>${k.status}</td><td>${k.created_at || ""}</td><td>${k.rotated_at || "-"}</td></tr>`).join("")}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function renderReleases(releases) {
+      state.releases = releases;
+      $("releasesTable").innerHTML = `
+        <table>
+          <thead><tr><th>Version</th><th>Security</th><th>Channel</th><th>Key IDs</th><th>Expires</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${releases.map((r) => `
+              <tr>
+                <td>${r.version}</td>
+                <td>${r.security_version}</td>
+                <td>${r.channel}</td>
+                <td><div class="code">active:${r.verification_key_id || "-"}<br/>next:${r.next_verification_key_id || "-"}</div></td>
+                <td>${r.expires_at}</td>
+                <td>
+                  <button data-verify-release="${r.id}" class="secondary">Verify</button>
+                </td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function renderBackupRuns(runs) {
+      $("backupRunsTable").innerHTML = `
+        <table>
+          <thead><tr><th>Operation</th><th>Status</th><th>Started</th><th>Finished</th><th>Backup Path</th><th>Error</th></tr></thead>
+          <tbody>
+            ${runs.map((r) => `
+              <tr>
+                <td>${r.operation}</td>
+                <td>${r.status}</td>
+                <td>${r.started_at || ""}</td>
+                <td>${r.finished_at || ""}</td>
+                <td class="code">${r.backup_path || "-"}</td>
+                <td>${r.error_message || "-"}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function renderAudit(rows) {
+      $("auditTable").innerHTML = `
+        <table>
+          <thead><tr><th>Time</th><th>Source</th><th>Action</th><th>Device</th><th>User</th><th>Details</th></tr></thead>
+          <tbody>
+            ${rows.map((r) => `
+              <tr>
+                <td>${r.created_at || ""}</td>
+                <td>${r.source || "-"}</td>
+                <td>${r.action}</td>
+                <td>${r.device_uid || "-"}</td>
+                <td>${r.user_email || "-"}</td>
+                <td class="code">${JSON.stringify(r.details || {})}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+    }
+
+    async function loadOverview() {
+      const overview = await api("/api/v1/admin/overview", { method: "GET" });
+      renderKpis(overview);
+    }
+
+    async function loadUsers() {
+      const users = await api("/api/v1/admin/users", { method: "GET" });
+      state.users = users;
+      renderUsers(users);
+    }
+
+    async function loadDevices() {
+      const devices = await api("/api/v1/admin/devices", { method: "GET" });
+      state.devices = devices;
+      renderDevices(devices);
+    }
+
+    async function loadOta() {
+      const [keys, releases] = await Promise.all([
+        api("/api/v1/ota/signing-keys", { method: "GET" }),
+        api("/api/v1/ota/releases", { method: "GET" })
+      ]);
+      renderSigningKeys(keys);
+      renderReleases(releases);
+    }
+
+    async function loadOpsRuns() {
+      const runs = await api("/api/v1/admin/ops/backup/runs?limit=50", { method: "GET" });
+      renderBackupRuns(runs);
+    }
+
+    async function loadAudit() {
+      const source = encodeURIComponent($("auditFilterSource").value || "");
+      const action = encodeURIComponent($("auditFilterAction").value || "");
+      const rows = await api(`/api/v1/admin/audit?limit=100&source=${source}&action=${action}`, { method: "GET" });
+      renderAudit(rows);
+    }
+
+    async function loadMetrics() {
+      const response = await fetch(baseUrl() + "/metrics");
+      $("metricsOutput").textContent = await response.text();
+    }
+
+    async function loadAll() {
+      await Promise.all([
+        loadOverview(),
+        loadUsers(),
+        loadDevices(),
+        loadOta(),
+        loadOpsRuns(),
+        loadAudit(),
+        loadMetrics()
+      ]);
+      log("Dashboard data refreshed.");
+    }
+
+    async function claimDeviceByCode(claimCode) {
+      if (!claimCode || !claimCode.trim()) {
+        throw new Error("Claim code is required.");
+      }
+      const out = await api("/api/v1/devices/claim", {
+        method: "POST",
+        body: JSON.stringify({ claim_code: claimCode.trim() })
+      });
+      $("claimCodeInput").value = "";
+      log(`Claimed device: ${out.device?.device_uid || "ok"}`);
+      await Promise.all([loadDevices(), loadOverview(), loadUsers()]);
+    }
+
+    async function login(endpoint) {
+      const body = {
+        email: $("email").value.trim(),
+        password: $("password").value
+      };
+      if (!body.email || !body.password) {
+        throw new Error("Email and password are required.");
+      }
+
+      const payload = endpoint === "register"
+        ? { ...body, name: body.email.split("@")[0] || "admin" }
+        : body;
+
+      const out = await api(`/api/v1/auth/${endpoint}`, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+
+      state.user = out.user;
+      state.accessToken = out.access_token;
+      state.refreshToken = out.refresh_token;
+      setAuthState();
+      persistSession();
+      log(`${endpoint} successful for ${state.user.email}.`);
+      await loadPreferences();
+      await loadAll();
+    }
+
+    async function refreshToken() {
+      await refreshAccessToken();
+    }
+
+    async function logout() {
+      if (state.refreshToken) {
+        try {
+          await rawRequest("/api/v1/auth/logout", {
+            method: "POST",
+            body: JSON.stringify({ refresh_token: state.refreshToken })
+          });
+        } catch {
+          // Continue local logout even if revoke fails.
+        }
+      }
+      clearSession();
+      setAuthState();
+      log("Logged out.");
+    }
+
+    $("loginBtn").addEventListener("click", async () => {
+      try { await login("login"); } catch (error) { log(`Login failed: ${error.message}`); }
+    });
+    $("registerBtn").addEventListener("click", async () => {
+      try { await login("register"); } catch (error) { log(`Register failed: ${error.message}`); }
+    });
+    $("refreshBtn").addEventListener("click", async () => {
+      try { await refreshToken(); } catch (error) { log(`Refresh failed: ${error.message}`); }
+    });
+    $("loadPrefsBtn").addEventListener("click", async () => {
+      try { await loadPreferences(); } catch (error) { log(`Load prefs failed: ${error.message}`); }
+    });
+    $("savePrefsBtn").addEventListener("click", async () => {
+      try { await savePreferences(); } catch (error) { log(`Save prefs failed: ${error.message}`); }
+    });
+    $("logoutBtn").addEventListener("click", async () => {
+      try { await logout(); } catch (error) { log(`Logout failed: ${error.message}`); }
+    });
+
+    $("reloadAllBtn").addEventListener("click", async () => {
+      try { await loadAll(); } catch (error) { log(`Reload failed: ${error.message}`); }
+    });
+
+    $("refreshDevicesBtn").addEventListener("click", async () => {
+      try { await loadDevices(); log("Devices refreshed."); } catch (error) { log(`Devices refresh failed: ${error.message}`); }
+    });
+
+    $("claimDeviceBtn").addEventListener("click", async () => {
+      try { await claimDeviceByCode($("claimCodeInput").value || ""); } catch (error) { log(`Claim failed: ${error.message}`); }
+    });
+
+    $("loadMetricsBtn").addEventListener("click", async () => {
+      try { await loadMetrics(); log("Loaded /metrics."); } catch (error) { log(`Metrics load failed: ${error.message}`); }
+    });
+
+    $("runBackupBtn").addEventListener("click", async () => {
+      try {
+        const out = await api("/api/v1/admin/ops/backup/run", { method: "POST", body: "{}" });
+        log(`Backup completed: ${out.backup_path}`);
+        await loadOpsRuns();
+      } catch (error) {
+        log(`Backup failed: ${error.message}`);
+      }
+    });
+
+    $("runRestoreDrillBtn").addEventListener("click", async () => {
+      try {
+        const backupPath = $("restorePath").value.trim();
+        const out = await api("/api/v1/admin/ops/restore-drill/run", {
+          method: "POST",
+          body: JSON.stringify({ backup_path: backupPath || undefined })
+        });
+        log(`Restore drill completed in ${out.elapsed_ms} ms.`);
+        await loadOpsRuns();
+      } catch (error) {
+        log(`Restore drill failed: ${error.message}`);
+      }
+    });
+
+    $("simulateAlertsBtn").addEventListener("click", async () => {
+      try {
+        const out = await api("/api/v1/admin/ops/alerts/simulate", {
+          method: "POST",
+          body: JSON.stringify({})
+        });
+        const fired = (out.alerts || []).filter((x) => x.fired).length;
+        log(`Alert simulation done. Fired alerts: ${fired}.`);
+      } catch (error) {
+        log(`Alert simulation failed: ${error.message}`);
+      }
+    });
+
+    $("clearLogBtn").addEventListener("click", () => { $("log").textContent = ""; });
+
+    $("createSigningKeyBtn").addEventListener("click", async () => {
+      try {
+        await api("/api/v1/ota/signing-keys", {
+          method: "POST",
+          body: JSON.stringify({
+            key_id: $("signingKeyId").value.trim(),
+            status: $("signingKeyStatus").value,
+            private_key_secret_ref: $("signingSecretRef").value.trim(),
+            public_key_pem: $("signingPublicPem").value
+          })
+        });
+        log("Signing key created.");
+        await loadOta();
+      } catch (error) {
+        log(`Create signing key failed: ${error.message}`);
+      }
+    });
+
+    $("rotateSigningKeysBtn").addEventListener("click", async () => {
+      try {
+        const out = await api("/api/v1/ota/signing-keys/rotate", { method: "POST", body: "{}" });
+        log(`Signing keys rotated. New active: ${out.active_key?.key_id || "n/a"}`);
+        await loadOta();
+      } catch (error) {
+        log(`Rotate signing keys failed: ${error.message}`);
+      }
+    });
+
+    $("createReleaseBtn").addEventListener("click", async () => {
+      try {
+        await api("/api/v1/ota/releases", {
+          method: "POST",
+          body: JSON.stringify({
+            model: $("releaseModel").value.trim(),
+            version: $("releaseVersion").value.trim(),
+            security_version: Number($("releaseSecurityVersion").value),
+            channel: $("releaseChannel").value,
+            url: $("releaseUrl").value.trim(),
+            size_bytes: Number($("releaseSizeBytes").value),
+            sha256: $("releaseSha").value.trim(),
+            expires_at: $("releaseExpiresAt").value.trim(),
+            is_active: true,
+            metadata: { created_from: "dashboard" },
+            auto_sign: true
+          })
+        });
+        log("OTA release created and signed.");
+        await loadOta();
+      } catch (error) {
+        log(`Create release failed: ${error.message}`);
+      }
+    });
+
+    $("releasesTable").addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const verifyId = target.getAttribute("data-verify-release");
+      if (!verifyId) return;
+      try {
+        const out = await api(`/api/v1/ota/releases/${encodeURIComponent(verifyId)}/verify`, { method: "GET" });
+        log(`Release ${verifyId} verification: ${out.ok ? "OK" : `FAILED (${out.reason})`}`);
+      } catch (error) {
+        log(`Release verify failed: ${error.message}`);
+      }
+    });
+
+    $("usersTable").addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const userId = target.getAttribute("data-user-save");
+      if (!userId) return;
+
+      try {
+        const name = document.querySelector(`[data-user-name=\"${userId}\"]`)?.value || "";
+        const role = document.querySelector(`[data-user-role=\"${userId}\"]`)?.value || "user";
+        const isActive = Boolean(document.querySelector(`[data-user-active=\"${userId}\"]`)?.checked);
+        await api(`/api/v1/admin/users/${encodeURIComponent(userId)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ name, role, is_active: isActive })
+        });
+        log(`User ${userId} updated.`);
+        await loadUsers();
+      } catch (error) {
+        log(`User update failed: ${error.message}`);
+      }
+    });
+
+    $("devicesTable").addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+
+      const relayCmd = target.getAttribute("data-relay");
+      const relayAll = target.getAttribute("data-relay-all");
+      const rotateToken = target.getAttribute("data-rotate-token");
+      const releaseDevice = target.getAttribute("data-release-device");
+      const deleteDevice = target.getAttribute("data-delete-device");
+      const claimCode = target.getAttribute("data-claim-code");
+
+      try {
+        if (relayCmd) {
+          const [deviceId, idx, action] = relayCmd.split(":");
+          await api(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}/relays/${encodeURIComponent(idx)}`, {
+            method: "POST",
+            body: JSON.stringify({ action })
+          });
+          log(`Relay command sent: ${deviceId} r${idx} ${action}`);
+          await loadDevices();
+          return;
+        }
+
+        if (relayAll) {
+          const [deviceId, action] = relayAll.split(":");
+          await api(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}/relays/all`, {
+            method: "POST",
+            body: JSON.stringify({ action })
+          });
+          log(`All-relay command sent: ${deviceId} ${action}`);
+          await loadDevices();
+          return;
+        }
+
+        if (rotateToken) {
+          const out = await api(`/api/v1/admin/devices/${encodeURIComponent(rotateToken)}/token/rotate`, {
+            method: "POST",
+            body: "{}"
+          });
+          log(`Token rotated for ${rotateToken}: ${out.device_token}`);
+          return;
+        }
+
+        if (releaseDevice) {
+          const out = await api(`/api/v1/admin/devices/${encodeURIComponent(releaseDevice)}/release`, {
+            method: "POST",
+            body: "{}"
+          });
+          log(`Device ${releaseDevice} released. Claim code: ${out.claim_code}`);
+          await Promise.all([loadDevices(), loadOverview()]);
+          return;
+        }
+
+        if (deleteDevice) {
+          if (!window.confirm(`Delete device ${deleteDevice}? This action cannot be undone.`)) {
+            return;
+          }
+          await api(`/api/v1/devices/${encodeURIComponent(deleteDevice)}`, {
+            method: "DELETE"
+          });
+          log(`Device deleted: ${deleteDevice}`);
+          await Promise.all([loadDevices(), loadOverview(), loadUsers()]);
+          return;
+        }
+
+        if (claimCode) {
+          await claimDeviceByCode(claimCode);
+          return;
+        }
+      } catch (error) {
+        log(`Device action failed: ${error.message}`);
+      }
+    });
+
+    $("loadAuditBtn").addEventListener("click", async () => {
+      try { await loadAudit(); log("Audit list refreshed."); } catch (error) { log(`Audit load failed: ${error.message}`); }
+    });
+
+    loadCollapsedCards();
+    setupCollapsibleCards();
+    restoreSession();
+    setAuthState();
+
+    if (state.user && state.refreshToken) {
+      log(`Restored session for ${state.user.email}.`);
+      (async () => {
+        try {
+          await loadPreferences();
+          await loadAll();
+        } catch (error) {
+          log(`Auto-load failed: ${error.message}`);
+        }
+      })();
+    } else {
+      log("Ready. Login with admin credentials to load live ops data.");
+    }
+  </script>
+</body>
+</html>

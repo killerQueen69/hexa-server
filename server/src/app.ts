@@ -25,7 +25,7 @@ import { smartHomeService } from "./services/smart-home-service";
 
 export function buildApp() {
   const testUiPath = path.resolve(process.cwd(), "..", "webapp", "app", "test-ui.html");
-  const dashboardPath = path.resolve(process.cwd(), "..", "webapp", "app", "dashboard.html");
+  const dashboardPath = path.resolve(process.cwd(), "public", "dashboard.html");
 
   const app = fastify({
     logger: true,

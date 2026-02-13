@@ -17,6 +17,7 @@
 - Monitoring and alerting: `docs/operations/monitoring-alerts.md`
 - Prometheus alert examples: `docs/operations/alert-rules.yml`
 - Rollback runbook: `docs/operations/rollback-runbook.md`
+- Server update runbook: `docs/operations/server-update-runbook.md`
 - Secrets and key rotation: `docs/operations/secret-and-key-rotation.md`
 - CI/CD gates: `docs/operations/ci-cd-gates.md`
 - Security checklist: `docs/operations/security-checklist.md`

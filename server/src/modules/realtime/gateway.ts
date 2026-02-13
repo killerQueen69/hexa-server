@@ -411,13 +411,49 @@ function handleDeviceSocket(
     }
 
     if (type === "input_event" || type === "ota_status") {
+      void updateLastSeen(deviceId, req.socket.remoteAddress ?? "").catch(() => undefined);
+
       if (type === "input_event") {
+        void query(
+          `INSERT INTO audit_log (
+             id, device_id, user_id, action, details, source, created_at
+           ) VALUES ($1, $2, NULL, $3, $4::jsonb, $5, $6)`,
+          [
+            newId(),
+            deviceId,
+            "input_event",
+            JSON.stringify({
+              ...message,
+              device_uid: deviceUid
+            }),
+            "device",
+            nowIso()
+          ]
+        ).catch(() => undefined);
+
         void automationService
           .handleInputEvent({
             ...message,
             device_uid: deviceUid
           })
           .catch(() => undefined);
+      } else {
+        void query(
+          `INSERT INTO audit_log (
+             id, device_id, user_id, action, details, source, created_at
+           ) VALUES ($1, $2, NULL, $3, $4::jsonb, $5, $6)`,
+          [
+            newId(),
+            deviceId,
+            "ota_status_report",
+            JSON.stringify({
+              ...message,
+              device_uid: deviceUid
+            }),
+            "device",
+            nowIso()
+          ]
+        ).catch(() => undefined);
       }
 
       const owner = ownerUserId;
