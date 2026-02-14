@@ -20,7 +20,10 @@ This is the implemented WS contract in `server/src/modules/realtime/gateway.ts`.
 
 - Max payload: `16 KB` per message.
 - Invalid/oversized JSON is ignored.
-- Device heartbeat ping interval: `20s`.
+- Device heartbeat ping interval: `2.5s`.
+- Miss limit before terminating device socket: `1` missed pong cycle.
+- Offline broadcast is delayed by a `5s` grace window to avoid transient disconnect flapping.
+- Any inbound device frame resets heartbeat miss tracking (not only explicit pong frames).
 - Device session is single-active per `device_uid` (new session replaces old one).
 
 ## 3. Device Channel Messages
@@ -134,16 +137,37 @@ Behavior:
 
 ### `config_update`
 
-Sent when input config or power restore mode is changed via API.
+Sent when input config, power restore mode, or connectivity settings are changed via API.
 
 ```json
 {
   "type": "config_update",
   "io_config": [],
   "power_restore_mode": "last_state",
+  "connectivity": {
+    "mode": "local_mqtt",
+    "mqtt": {
+      "enabled": true,
+      "host": "192.168.0.100",
+      "port": 1883,
+      "username": "user",
+      "password": "pass",
+      "discovery_prefix": "homeassistant",
+      "base_topic": "d"
+    },
+    "wifi": {
+      "op": "set",
+      "ssid": "MyWiFi",
+      "password": "MyPass1234",
+      "reboot": true
+    }
+  },
   "ts": "2026-02-13T12:02:00.000Z"
 }
 ```
+
+If `connectivity.mode` changes transport mode (`cloud_ws` <-> `local_mqtt`), firmware is expected to apply config and reboot to switch stacks cleanly.
+If `connectivity.wifi.op` is `set` or `clear`, firmware applies the Wi-Fi credential update and can reboot when `reboot` is true.
 
 ## 4. Client Channel Messages
 
@@ -190,10 +214,43 @@ All-relays command:
 }
 ```
 
+Wi-Fi provisioning command (`set`):
+
+```json
+{
+  "type": "cmd",
+  "request_id": "req-003",
+  "device_id": "device-uuid",
+  "scope": "wifi",
+  "wifi": {
+    "op": "set",
+    "ssid": "MyWiFi",
+    "password": "MyPass1234",
+    "reboot": true
+  }
+}
+```
+
+Wi-Fi credential removal command (`clear`):
+
+```json
+{
+  "type": "cmd",
+  "request_id": "req-004",
+  "device_id": "device-uuid",
+  "scope": "wifi",
+  "wifi": {
+    "op": "clear",
+    "reboot": true
+  }
+}
+```
+
 Server returns `cmd_ack` with either:
 
 - `ok: true` and command result
 - or `ok: false` with `code`/`message`
+- Command authorization: device owner can send commands; admin sessions are also allowed.
 
 ## 4.2 Server -> Client
 
@@ -251,4 +308,5 @@ Example `cmd_ack` failure:
 - Include stable `request_id` in `cmd` for client correlation.
 - Device firmware should always ACK command IDs exactly once.
 - Device should send periodic `state_report` to keep presence fresh.
+- On transport mode change pushed via `config_update`, firmware should persist settings and reboot.
 - Handle reconnects and replay initial state via REST on reconnect.

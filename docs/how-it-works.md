@@ -34,9 +34,9 @@ Core design rule:
 ### 2.2 Devices
 
 1. Device provisions with `POST /api/v1/provision/register` using `DEVICE_PROVISION_KEY`.
-2. Server returns `device_uid` + `device_token`.
+2. Server returns `device_uid` + `device_token` (+ stable `claim_code` for unclaimed devices).
 3. Device opens `WS /ws/device?uid=<uid>&token=<token>`.
-4. Server validates token hash, registers session, and starts heartbeat tracking.
+4. Server validates token hash, registers session, and starts heartbeat tracking (`2.5s` ping interval, `5s` offline grace before broadcast).
 
 ## 3. Relay Command Path (Single Source Of Truth)
 
@@ -44,7 +44,7 @@ When any source triggers a relay command (API, WS client, schedule, automation, 
 
 1. Validate ownership/device status.
 2. Send WS command to device (`set_relay` or `set_all_relays`) with `command_id`.
-3. Wait for device `ack` or timeout.
+3. Wait for device `ack` (effective wait capped to `4000ms`), then optionally verify via fresh `state_report` window (capped to `800ms`) before declaring unreachable.
 4. Persist relay states in `relay_states`.
 5. Update in-memory device state cache.
 6. Broadcast updates to relevant web client sessions.
@@ -72,6 +72,13 @@ When a device sends `input_event`:
 - Automation engine evaluates matching enabled rules.
 - If rule matches and passes cooldown/dedupe, relay action is executed through relay service.
 - `automation_fired` is pushed to user clients.
+
+### 4.3 Presence and Offline Detection
+
+- Device WS sockets are pinged every `2500ms`.
+- If one heartbeat window is missed, the socket is terminated.
+- `device_offline` broadcast is delayed by `5000ms` grace; reconnects in that window suppress offline event spam.
+- Any inbound device WS message counts as liveness (not only explicit pong frames).
 
 ## 5. Extensibility for Future Device Families
 
@@ -232,22 +239,33 @@ When `HA_MQTT_ENABLED=true`, the server acts as an MQTT client and connects outb
 
 No inbound MQTT listener is opened on this server for HA integration; only outbound broker connections are used.
 
-## 13. Request Idempotency and Error Contract
+## 13. Firmware Local MQTT Mode (Device-Side, Offline Path)
 
-### 13.1 Idempotency
+Separate from the server HA bridge, firmware can run in local MQTT transport mode:
+
+- Mode values: `cloud_ws` or `local_mqtt`.
+- Mode and broker settings are persisted in device EEPROM.
+- Server can push mode/broker changes via WS `config_update.connectivity`.
+- Firmware applies config and reboots when transport mode changes.
+- Local mode exposes HA discovery and command/state topics directly from device.
+- Switching local mode back to cloud mode also uses controlled reboot to re-initialize transport safely.
+
+## 14. Request Idempotency and Error Contract
+
+### 14.1 Idempotency
 
 - Applies to mutating methods (`POST`, `PATCH`, `PUT`, `DELETE`) when `idempotency-key` header is sent.
 - Replay returns original response + `idempotency-replayed: true`.
 - Conflicting payload for same key returns `409 idempotency_conflict`.
 
-### 13.2 Production Transport Security
+### 14.2 Production Transport Security
 
 - In production, when `ENFORCE_HTTPS=true`, plain HTTP and non-secure WS upgrades are rejected.
 - Plain HTTP requests are rejected with `426 https_required` (except localhost maintenance access).
 - Proxy TLS termination is supported via `TRUST_PROXY=true` and forwarded proto checks.
 - Intended deployment pattern: TLS termination at reverse proxy (e.g., Caddy) with forwarded proto headers.
 
-### 13.3 Error Shape
+### 14.3 Error Shape
 
 All API errors use:
 

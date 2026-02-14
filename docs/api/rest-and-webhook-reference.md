@@ -103,6 +103,7 @@ Prefix: `/api/v1/provision`
   - `provision_key`
   - `chip_id`
   - optional `mac`
+  - optional `claim_code` (8 hex chars). If not provided, server derives a stable claim code from MAC/hardware/device identity.
   - optional `model`
   - optional `firmware_version`
   - optional `relay_count`
@@ -134,7 +135,7 @@ Prefix: `/api/v1/devices`
 ### `POST /:id/release`
 
 - Release owned device back to unclaimed pool.
-- Returns new `claim_code`.
+- Returns stable `claim_code` (existing code is reused; release does not rotate it).
 
 ### `POST /` (admin role)
 
@@ -146,6 +147,7 @@ Prefix: `/api/v1/devices`
 ### `PATCH /:id`
 
 - Update owned device fields (`name`, `is_active`, `firmware_version`, `device_class`, `capabilities`, `input_config`, `power_restore_mode`, `config`).
+- If `config.connectivity`/`config.connection` contains transport settings, server pushes a runtime `config_update` with connectivity payload to the online device.
 
 ### `PATCH /:id/io-config`
 
@@ -162,13 +164,22 @@ Prefix: `/api/v1/devices`
 
 - Body: `action` in `on|off|toggle`
 - Optional body field: `timeout_ms` (1000-30000) to override command ACK timeout per request.
+- Effective server-side command wait is capped to `4000ms` (internal guardrail).
 - Executes single relay command.
 
 ### `POST /:id/relays/all`
 
 - Body: `action` in `on|off`
 - Optional body field: `timeout_ms` (1000-30000) to override command ACK timeout per request.
+- Effective server-side command wait is capped to `4000ms` (internal guardrail).
 - Executes all-relays command.
+
+Relay command error notes:
+
+- `409 device_offline`: no active WS device session.
+- `409 device_disconnected`: WS session dropped before ACK.
+- `409 device_unreachable`: ACK timed out and state verification window did not confirm the command.
+- ACK timeout fallback uses state verification window (capped to `800ms`) before returning `device_unreachable`.
 
 ### `POST /:id/token/rotate`
 
@@ -459,6 +470,12 @@ Prefix: `/api/v1/admin`
 
 - Global audit log query with filters.
 
+#### `DELETE /audit`
+
+- Clears audit rows.
+- Optional query filters: `device_id`, `source`, `action`.
+- Returns number of deleted rows.
+
 ## 13. Admin Operations APIs
 
 Prefix: `/api/v1/admin` (admin role required)
@@ -485,7 +502,8 @@ Prefix: `/api/v1/admin` (admin role required)
 Relay/admin command behavior:
 
 - `device_disconnected` now returns HTTP `409` when the device disconnects before ACK.
-- `device_ack_timeout` returns HTTP `504` after timeout + optional state-verify window.
+- `device_unreachable` returns HTTP `409` after ACK timeout + state-verify window miss.
+- `device_offline` returns HTTP `409` when device session is not online.
 
 ### Backup and Restore
 
@@ -513,6 +531,11 @@ Outbound HTTP webhooks:
 ## 15. Home Assistant MQTT Bridge (Non-HTTP)
 
 The HA integration is MQTT-based (not REST/webhook). The server connects outbound to a broker and publishes discovery/state while consuming command topics.
+
+Notes:
+
+- This section is for server-side HA bridge (`HA_MQTT_*` env vars).
+- Firmware local MQTT transport mode is a separate device-side path switched via `config_update.connectivity.mode`.
 
 ### MQTT Topic Contract
 

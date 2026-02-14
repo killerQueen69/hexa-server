@@ -4,6 +4,8 @@
 
 - System architecture and runtime behavior:
   - `docs/how-it-works.md`
+- Firmware behavior, build profiles, and local MQTT topic contract:
+  - `docs/firmware-runtime.md`
 - Full REST API and webhook-style HTTP callback reference:
   - `docs/api/rest-and-webhook-reference.md`
   - includes device extensibility APIs (`capabilities`, `ir-codes`, `sensor-*`) and user preferences APIs (`/api/v1/preferences`)
@@ -18,6 +20,7 @@
 - Prometheus alert examples: `docs/operations/alert-rules.yml`
 - Rollback runbook: `docs/operations/rollback-runbook.md`
 - Server update runbook: `docs/operations/server-update-runbook.md`
+- Realtime load-test runbook: `docs/operations/load-test-realtime.md`
 - Secrets and key rotation: `docs/operations/secret-and-key-rotation.md`
 - CI/CD gates: `docs/operations/ci-cd-gates.md`
 - Security checklist: `docs/operations/security-checklist.md`

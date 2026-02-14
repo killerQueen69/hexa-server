@@ -75,3 +75,20 @@ Treat as pass when:
 - `/metrics` does not show timeout spikes during run
 
 The script exits non-zero on failed thresholds.
+
+## 7) Known Issues (As of February 14, 2026)
+
+The following scaling risks are known and not yet fixed in code:
+
+- `last_seen` write amplification:
+  - Device traffic updates `devices.last_seen_at` very frequently (`state_report`, `input_event`, `ota_status`).
+  - Under sustained websocket traffic this adds avoidable DB write pressure.
+- Command-path DB round trips:
+  - Each command still performs several DB calls (ownership check, device reads, state writes, audit inserts).
+  - This can become a latency and throughput limiter before CPU/network saturation.
+- Timeout behavior mismatch:
+  - Relay command handling internally clamps effective timeout windows tighter than environment defaults.
+  - Under bursty load, commands can fail early even when client timeout is configured higher.
+- DB connection handling for higher scale:
+  - Current single-node setup relies on direct Postgres connections from the app pool.
+  - For larger sustained load, add PgBouncer and retune app pool + Postgres `max_connections` with real metrics.
