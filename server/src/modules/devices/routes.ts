@@ -44,6 +44,19 @@ type InputConfigRow = {
   hold_seconds: number | null;
 };
 
+type ConnectivityUpdatePayload = {
+  mode?: "cloud_ws" | "local_mqtt";
+  mqtt?: {
+    enabled?: boolean;
+    host?: string;
+    port?: number;
+    username?: string;
+    password?: string;
+    discovery_prefix?: string;
+    base_topic?: string;
+  };
+};
+
 type CapabilitySummary = {
   key: string;
   kind: string;
@@ -305,6 +318,7 @@ function pushDeviceConfigUpdate(
   payload: {
     io_config?: InputConfigRow[];
     power_restore_mode?: "last_state" | "all_off" | "all_on";
+    connectivity?: ConnectivityUpdatePayload;
   }
 ): void {
   realtimeHub.sendToDevice(deviceUid, {
@@ -312,6 +326,94 @@ function pushDeviceConfigUpdate(
     ...payload,
     ts: nowIso()
   });
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizeConnectionMode(value: unknown): "cloud_ws" | "local_mqtt" | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "cloud_ws" || normalized === "cloud" || normalized === "app") {
+    return "cloud_ws";
+  }
+  if (normalized === "local_mqtt" || normalized === "ha" || normalized === "mqtt") {
+    return "local_mqtt";
+  }
+  return null;
+}
+
+function extractConnectivityUpdate(configValue: unknown): ConnectivityUpdatePayload | undefined {
+  const config = asRecord(configValue);
+  if (!config) {
+    return undefined;
+  }
+
+  const connectivity = asRecord(config.connectivity) ?? asRecord(config.connection);
+  if (!connectivity) {
+    return undefined;
+  }
+
+  const out: ConnectivityUpdatePayload = {};
+  const mode = normalizeConnectionMode(
+    connectivity.mode ?? connectivity.connection_mode ?? connectivity.transport_mode
+  );
+  if (mode) {
+    out.mode = mode;
+  }
+
+  const mqttSource =
+    asRecord(connectivity.mqtt) ??
+    asRecord(connectivity.local_mqtt) ??
+    asRecord(config.local_mqtt);
+  if (mqttSource) {
+    const mqtt: NonNullable<ConnectivityUpdatePayload["mqtt"]> = {};
+    if (typeof mqttSource.enabled === "boolean") {
+      mqtt.enabled = mqttSource.enabled;
+    } else if (typeof mqttSource.enable === "boolean") {
+      mqtt.enabled = mqttSource.enable;
+    }
+    if (typeof mqttSource.host === "string" && mqttSource.host.trim().length > 0) {
+      mqtt.host = mqttSource.host.trim();
+    }
+    if (typeof mqttSource.port === "number" && Number.isInteger(mqttSource.port)) {
+      const port = mqttSource.port;
+      if (port > 0 && port <= 65535) {
+        mqtt.port = port;
+      }
+    }
+    if (typeof mqttSource.username === "string") {
+      mqtt.username = mqttSource.username;
+    } else if (typeof mqttSource.user === "string") {
+      mqtt.username = mqttSource.user;
+    }
+    if (typeof mqttSource.password === "string") {
+      mqtt.password = mqttSource.password;
+    } else if (typeof mqttSource.pass === "string") {
+      mqtt.password = mqttSource.pass;
+    }
+    if (typeof mqttSource.discovery_prefix === "string") {
+      mqtt.discovery_prefix = mqttSource.discovery_prefix;
+    }
+    if (typeof mqttSource.base_topic === "string") {
+      mqtt.base_topic = mqttSource.base_topic;
+    }
+
+    if (Object.keys(mqtt).length > 0) {
+      out.mqtt = mqtt;
+    }
+  }
+
+  if (!out.mode && !out.mqtt) {
+    return undefined;
+  }
+  return out;
 }
 
 async function getOwnedDevice(deviceId: string, userId: string): Promise<DeviceRow | null> {
@@ -682,10 +784,14 @@ export async function deviceRoutes(server: FastifyInstance): Promise<void> {
       return sendApiError(reply, 404, "not_found", "Owned device not found.");
     }
 
-    if (nextInputConfig || typeof changes.power_restore_mode !== "undefined") {
+    const connectivityUpdate =
+      typeof changes.config !== "undefined" ? extractConnectivityUpdate(updated.rows[0].config) : undefined;
+
+    if (nextInputConfig || typeof changes.power_restore_mode !== "undefined" || connectivityUpdate) {
       pushDeviceConfigUpdate(updated.rows[0].device_uid, {
         io_config: nextInputConfig ?? undefined,
-        power_restore_mode: changes.power_restore_mode
+        power_restore_mode: changes.power_restore_mode,
+        connectivity: connectivityUpdate
       });
     }
 

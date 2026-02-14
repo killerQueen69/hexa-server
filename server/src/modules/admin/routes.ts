@@ -45,6 +45,7 @@ type DeviceRow = {
   owner_user_id: string | null;
   owner_email: string | null;
   claim_code: string | null;
+  config: unknown;
   last_action_at: Date | string | null;
   last_action: unknown;
   last_input_event: unknown;
@@ -61,6 +62,19 @@ type InputConfigRow = {
   rocker_mode: "edge_toggle" | "follow_position" | null;
   invert_input: boolean;
   hold_seconds: number | null;
+};
+
+type ConnectivityUpdatePayload = {
+  mode?: "cloud_ws" | "local_mqtt";
+  mqtt?: {
+    enabled?: boolean;
+    host?: string;
+    port?: number;
+    username?: string;
+    password?: string;
+    discovery_prefix?: string;
+    base_topic?: string;
+  };
 };
 
 type InputConfigValidationDevice = {
@@ -152,7 +166,8 @@ const updateDeviceSchema = z.object({
   ).optional(),
   power_restore_mode: z.enum(["last_state", "all_off", "all_on"]).optional(),
   ota_channel: z.enum(["dev", "beta", "stable"]).optional(),
-  firmware_version: z.string().min(1).max(100).nullable().optional()
+  firmware_version: z.string().min(1).max(100).nullable().optional(),
+  config: z.record(z.unknown()).optional()
 });
 
 const relayCommandSchema = z.object({
@@ -295,6 +310,7 @@ function serializeDevice(row: DeviceRow) {
     owner_user_id: row.owner_user_id,
     owner_email: row.owner_email,
     claim_code: row.claim_code,
+    config: row.config,
     last_action_at: toIso(row.last_action_at),
     last_action: asNullableObject(row.last_action),
     last_input_event: asNullableObject(row.last_input_event),
@@ -409,6 +425,7 @@ function pushDeviceConfigUpdate(
   payload: {
     io_config?: InputConfigRow[];
     power_restore_mode?: "last_state" | "all_off" | "all_on";
+    connectivity?: ConnectivityUpdatePayload;
   }
 ): void {
   realtimeHub.sendToDevice(deviceUid, {
@@ -416,6 +433,94 @@ function pushDeviceConfigUpdate(
     ...payload,
     ts: nowIso()
   });
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizeConnectionMode(value: unknown): "cloud_ws" | "local_mqtt" | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "cloud_ws" || normalized === "cloud" || normalized === "app") {
+    return "cloud_ws";
+  }
+  if (normalized === "local_mqtt" || normalized === "ha" || normalized === "mqtt") {
+    return "local_mqtt";
+  }
+  return null;
+}
+
+function extractConnectivityUpdate(configValue: unknown): ConnectivityUpdatePayload | undefined {
+  const config = asRecord(configValue);
+  if (!config) {
+    return undefined;
+  }
+
+  const connectivity = asRecord(config.connectivity) ?? asRecord(config.connection);
+  if (!connectivity) {
+    return undefined;
+  }
+
+  const out: ConnectivityUpdatePayload = {};
+  const mode = normalizeConnectionMode(
+    connectivity.mode ?? connectivity.connection_mode ?? connectivity.transport_mode
+  );
+  if (mode) {
+    out.mode = mode;
+  }
+
+  const mqttSource =
+    asRecord(connectivity.mqtt) ??
+    asRecord(connectivity.local_mqtt) ??
+    asRecord(config.local_mqtt);
+  if (mqttSource) {
+    const mqtt: NonNullable<ConnectivityUpdatePayload["mqtt"]> = {};
+    if (typeof mqttSource.enabled === "boolean") {
+      mqtt.enabled = mqttSource.enabled;
+    } else if (typeof mqttSource.enable === "boolean") {
+      mqtt.enabled = mqttSource.enable;
+    }
+    if (typeof mqttSource.host === "string" && mqttSource.host.trim().length > 0) {
+      mqtt.host = mqttSource.host.trim();
+    }
+    if (typeof mqttSource.port === "number" && Number.isInteger(mqttSource.port)) {
+      const port = mqttSource.port;
+      if (port > 0 && port <= 65535) {
+        mqtt.port = port;
+      }
+    }
+    if (typeof mqttSource.username === "string") {
+      mqtt.username = mqttSource.username;
+    } else if (typeof mqttSource.user === "string") {
+      mqtt.username = mqttSource.user;
+    }
+    if (typeof mqttSource.password === "string") {
+      mqtt.password = mqttSource.password;
+    } else if (typeof mqttSource.pass === "string") {
+      mqtt.password = mqttSource.pass;
+    }
+    if (typeof mqttSource.discovery_prefix === "string") {
+      mqtt.discovery_prefix = mqttSource.discovery_prefix;
+    }
+    if (typeof mqttSource.base_topic === "string") {
+      mqtt.base_topic = mqttSource.base_topic;
+    }
+
+    if (Object.keys(mqtt).length > 0) {
+      out.mqtt = mqtt;
+    }
+  }
+
+  if (!out.mode && !out.mqtt) {
+    return undefined;
+  }
+  return out;
 }
 
 async function userExists(userId: string): Promise<boolean> {
@@ -467,12 +572,13 @@ async function listGlobalDevices(): Promise<DeviceRow[]> {
        d.ota_security_version,
        d.last_seen_at,
        d.last_ip,
-       d.is_active,
-       d.owner_user_id,
-       d.claim_code,
-       (
-         SELECT a.created_at
-         FROM audit_log a
+        d.is_active,
+        d.owner_user_id,
+        d.claim_code,
+        d.config,
+        (
+          SELECT a.created_at
+          FROM audit_log a
          WHERE a.device_id = d.id
          ORDER BY a.created_at DESC
          LIMIT 1
@@ -880,6 +986,10 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
         values.push(changes.power_restore_mode);
         fields.push(`power_restore_mode = $${values.length}`);
       }
+      if (typeof changes.config !== "undefined") {
+        values.push(JSON.stringify(changes.config));
+        fields.push(`config = $${values.length}::jsonb`);
+      }
       if (typeof changes.owner_user_id !== "undefined") {
         values.push(changes.owner_user_id);
         fields.push(`owner_user_id = $${values.length}`);
@@ -952,6 +1062,7 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
            d.is_active,
            d.owner_user_id,
            d.claim_code,
+           d.config,
            (
              SELECT a.created_at
              FROM audit_log a
@@ -1018,10 +1129,17 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
       return sendApiError(reply, 404, "not_found", "Device not found.");
     }
 
-    if (normalizedInputConfig || typeof changes.power_restore_mode !== "undefined") {
+    const connectivityUpdate =
+      typeof changes.config !== "undefined" ? extractConnectivityUpdate(updated.config) : undefined;
+    if (
+      normalizedInputConfig ||
+      typeof changes.power_restore_mode !== "undefined" ||
+      connectivityUpdate
+    ) {
       pushDeviceConfigUpdate(updated.device_uid, {
         io_config: normalizedInputConfig,
-        power_restore_mode: changes.power_restore_mode
+        power_restore_mode: changes.power_restore_mode,
+        connectivity: connectivityUpdate
       });
     }
     return reply.send(serializeDevice(updated));

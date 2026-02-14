@@ -406,6 +406,17 @@
       margin: 0;
     }
 
+    .conn-editor {
+      display: grid;
+      gap: 8px;
+    }
+
+    .conn-grid {
+      display: grid;
+      gap: 6px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
     .device-event {
       display: grid;
       gap: 4px;
@@ -466,6 +477,7 @@
       .devices-list { padding: 4px; }
       .device-meta-grid,
       .relay-grid,
+      .conn-grid,
       .io-row-grid { grid-template-columns: 1fr; }
     }
   </style>
@@ -1810,6 +1822,204 @@
       return normalized;
     }
 
+    function asConfigObject(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return {};
+      }
+      return value;
+    }
+
+    function normalizeConnectivityMode(value) {
+      if (typeof value !== "string") {
+        return "cloud_ws";
+      }
+      const normalized = value.trim().toLowerCase();
+      if (normalized === "local_mqtt" || normalized === "mqtt" || normalized === "ha") {
+        return "local_mqtt";
+      }
+      return "cloud_ws";
+    }
+
+    function normalizedConnectivityConfig(device) {
+      const configRoot = asConfigObject(device?.config);
+      const connectivity = asConfigObject(configRoot.connectivity || configRoot.connection);
+      const mqtt = asConfigObject(connectivity.mqtt || connectivity.local_mqtt || configRoot.local_mqtt);
+      const rawPort = Number.parseInt(String(mqtt.port ?? ""), 10);
+      const port = Number.isInteger(rawPort) && rawPort > 0 && rawPort <= 65535 ? rawPort : 1883;
+      const mode = normalizeConnectivityMode(
+        connectivity.mode || connectivity.connection_mode || connectivity.transport_mode
+      );
+      return {
+        mode,
+        mqtt: {
+          enabled: typeof mqtt.enabled === "boolean" ? mqtt.enabled : true,
+          host: typeof mqtt.host === "string" ? mqtt.host.trim() : "",
+          port,
+          username: typeof mqtt.username === "string"
+            ? mqtt.username
+            : (typeof mqtt.user === "string" ? mqtt.user : ""),
+          password: typeof mqtt.password === "string"
+            ? mqtt.password
+            : (typeof mqtt.pass === "string" ? mqtt.pass : ""),
+          discovery_prefix: typeof mqtt.discovery_prefix === "string" && mqtt.discovery_prefix.trim()
+            ? mqtt.discovery_prefix.trim()
+            : "homeassistant",
+          base_topic: typeof mqtt.base_topic === "string" && mqtt.base_topic.trim()
+            ? mqtt.base_topic.trim()
+            : "d"
+        }
+      };
+    }
+
+    function buildConnectivityEditor(device) {
+      const cfg = normalizedConnectivityConfig(device);
+      const canEdit = isAdminUser() || Boolean(device?.is_owner);
+      const mode = cfg.mode === "local_mqtt" ? "local_mqtt" : "cloud_ws";
+      const mqttEditable = canEdit && mode === "local_mqtt";
+      const lockAttr = canEdit ? "" : ' data-conn-lock="1"';
+      const modeLockAttr = canEdit ? "" : ' data-conn-lock="1"';
+      return `
+        <div class="conn-editor">
+          <div class="conn-grid">
+            <div>
+              <label>Control Mode</label>
+              <select data-conn-mode="${escapeHtml(device.id)}"${modeLockAttr} ${canEdit ? "" : "disabled"}>
+                <option value="cloud_ws" ${mode === "cloud_ws" ? "selected" : ""}>Cloud (Hexa Server)</option>
+                <option value="local_mqtt" ${mode === "local_mqtt" ? "selected" : ""}>Local MQTT (Home Assistant)</option>
+              </select>
+            </div>
+            <div>
+              <label>MQTT Port</label>
+              <input data-conn-port="${escapeHtml(device.id)}" type="number" min="1" max="65535" value="${escapeHtml(cfg.mqtt.port)}"${lockAttr} ${mqttEditable ? "" : "disabled"} />
+            </div>
+            <div>
+              <label>MQTT Host</label>
+              <input data-conn-host="${escapeHtml(device.id)}" value="${escapeHtml(cfg.mqtt.host)}"${lockAttr} ${mqttEditable ? "" : "disabled"} />
+            </div>
+            <div>
+              <label>MQTT Username</label>
+              <input data-conn-username="${escapeHtml(device.id)}" value="${escapeHtml(cfg.mqtt.username)}"${lockAttr} ${mqttEditable ? "" : "disabled"} />
+            </div>
+            <div>
+              <label>MQTT Password</label>
+              <input data-conn-password="${escapeHtml(device.id)}" type="password" value="${escapeHtml(cfg.mqtt.password)}"${lockAttr} ${mqttEditable ? "" : "disabled"} />
+            </div>
+            <div>
+              <label>Discovery Prefix</label>
+              <input data-conn-discovery="${escapeHtml(device.id)}" value="${escapeHtml(cfg.mqtt.discovery_prefix)}"${lockAttr} ${mqttEditable ? "" : "disabled"} />
+            </div>
+            <div>
+              <label>Base Topic</label>
+              <input data-conn-base-topic="${escapeHtml(device.id)}" value="${escapeHtml(cfg.mqtt.base_topic)}"${lockAttr} ${mqttEditable ? "" : "disabled"} />
+            </div>
+            <label class="io-inline-check">
+              <input data-conn-enabled="${escapeHtml(device.id)}" type="checkbox" ${cfg.mqtt.enabled ? "checked" : ""}${lockAttr} ${mqttEditable ? "" : "disabled"} />
+              enable local MQTT
+            </label>
+          </div>
+          ${canEdit
+            ? '<div class="meta">Changing mode may restart device networking briefly.</div>'
+            : '<div class="meta">Read-only. Only owner/admin can change connectivity mode.</div>'}
+        </div>
+      `;
+    }
+
+    function syncConnectivityControls(deviceId) {
+      const modeEl = document.querySelector(`[data-conn-mode="${deviceId}"]`);
+      if (!(modeEl instanceof HTMLSelectElement)) {
+        return;
+      }
+      if (modeEl.dataset.connLock === "1") {
+        return;
+      }
+
+      const localMode = modeEl.value === "local_mqtt";
+      const selectors = [
+        `[data-conn-enabled="${deviceId}"]`,
+        `[data-conn-host="${deviceId}"]`,
+        `[data-conn-port="${deviceId}"]`,
+        `[data-conn-username="${deviceId}"]`,
+        `[data-conn-password="${deviceId}"]`,
+        `[data-conn-discovery="${deviceId}"]`,
+        `[data-conn-base-topic="${deviceId}"]`
+      ];
+      for (const selector of selectors) {
+        const field = document.querySelector(selector);
+        if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement)) {
+          continue;
+        }
+        if (field.dataset.connLock === "1") {
+          field.disabled = true;
+          continue;
+        }
+        field.disabled = !localMode;
+      }
+    }
+
+    function collectConnectivityConfigFromEditor(device) {
+      const deviceId = device?.id;
+      if (!deviceId) {
+        throw new Error("Device id is required.");
+      }
+
+      const modeEl = document.querySelector(`[data-conn-mode="${deviceId}"]`);
+      const enabledEl = document.querySelector(`[data-conn-enabled="${deviceId}"]`);
+      const hostEl = document.querySelector(`[data-conn-host="${deviceId}"]`);
+      const portEl = document.querySelector(`[data-conn-port="${deviceId}"]`);
+      const usernameEl = document.querySelector(`[data-conn-username="${deviceId}"]`);
+      const passwordEl = document.querySelector(`[data-conn-password="${deviceId}"]`);
+      const discoveryEl = document.querySelector(`[data-conn-discovery="${deviceId}"]`);
+      const baseTopicEl = document.querySelector(`[data-conn-base-topic="${deviceId}"]`);
+
+      if (!(modeEl instanceof HTMLSelectElement)) throw new Error("Missing connectivity mode control.");
+      if (!(enabledEl instanceof HTMLInputElement)) throw new Error("Missing MQTT enabled control.");
+      if (!(hostEl instanceof HTMLInputElement)) throw new Error("Missing MQTT host control.");
+      if (!(portEl instanceof HTMLInputElement)) throw new Error("Missing MQTT port control.");
+      if (!(usernameEl instanceof HTMLInputElement)) throw new Error("Missing MQTT username control.");
+      if (!(passwordEl instanceof HTMLInputElement)) throw new Error("Missing MQTT password control.");
+      if (!(discoveryEl instanceof HTMLInputElement)) throw new Error("Missing discovery prefix control.");
+      if (!(baseTopicEl instanceof HTMLInputElement)) throw new Error("Missing base topic control.");
+
+      const mode = modeEl.value === "local_mqtt" ? "local_mqtt" : "cloud_ws";
+      const host = hostEl.value.trim();
+      const portParsed = Number.parseInt(portEl.value, 10);
+      if (!Number.isInteger(portParsed) || portParsed < 1 || portParsed > 65535) {
+        throw new Error("MQTT port must be between 1 and 65535.");
+      }
+
+      if (mode === "local_mqtt" && !host) {
+        throw new Error("MQTT host is required in local MQTT mode.");
+      }
+
+      return {
+        mode,
+        mqtt: {
+          enabled: enabledEl.checked,
+          host,
+          port: portParsed,
+          username: usernameEl.value,
+          password: passwordEl.value,
+          discovery_prefix: discoveryEl.value.trim() || "homeassistant",
+          base_topic: baseTopicEl.value.trim() || "d"
+        }
+      };
+    }
+
+    function mergeConnectivityConfig(device, connectivityPayload) {
+      const root = asConfigObject(safeParseJson(JSON.stringify(asConfigObject(device?.config)), {}));
+      const existingConnectivity = asConfigObject(root.connectivity);
+      const existingMqtt = asConfigObject(existingConnectivity.mqtt);
+      root.connectivity = {
+        ...existingConnectivity,
+        mode: connectivityPayload.mode,
+        mqtt: {
+          ...existingMqtt,
+          ...connectivityPayload.mqtt
+        }
+      };
+      return root;
+    }
+
     function buildInputConfigEditor(device) {
       const relayNames = Array.isArray(device?.relay_names) ? device.relay_names : [];
       const relayCount = Number.isInteger(device?.relay_count) ? device.relay_count : 0;
@@ -2053,6 +2263,8 @@
         }).join("");
 
         const inputEditor = buildInputConfigEditor(d);
+        const connectivityEditor = buildConnectivityEditor(d);
+        const connectivityConfig = normalizedConnectivityConfig(d);
         const buttonStates = renderButtonStates(d);
 
         const wsOnline = typeof d.ws_online === "boolean" ? d.ws_online : null;
@@ -2100,6 +2312,8 @@
                 <div class="device-meta-value">last_seen: ${escapeHtml(formatIsoWithOffset(d.last_seen_at))}</div>
                 <div class="meta">age: ${escapeHtml(ageLabel(d.last_seen_at))}</div>
                 <div class="meta">ip: ${escapeHtml(d.last_ip || "-")}</div>
+                <div class="meta">mode: ${escapeHtml(connectivityConfig.mode)}</div>
+                <div class="meta">broker: ${escapeHtml(connectivityConfig.mqtt.host || "-")}:${escapeHtml(connectivityConfig.mqtt.port)}</div>
               </div>
               <div class="device-meta-card">
                 <div class="device-meta-label">I/O Summary</div>
@@ -2128,6 +2342,14 @@
                 <div class="device-action-row">
                   <button data-save-io="${escapeHtml(d.id)}" class="secondary">Save I/O</button>
                 </div>` : ""}
+              </section>
+
+              <section class="device-block">
+                <div class="device-block-title">Connectivity Mode</div>
+                ${connectivityEditor}
+                <div class="device-action-row">
+                  <button data-save-conn="${escapeHtml(d.id)}" class="secondary" ${(admin || d.is_owner) ? "" : "disabled"}>Save Connectivity</button>
+                </div>
               </section>
             </div>
 
@@ -2647,6 +2869,7 @@
       const relayCmd = target.getAttribute("data-relay");
       const relayAll = target.getAttribute("data-relay-all");
       const saveIo = target.getAttribute("data-save-io");
+      const saveConn = target.getAttribute("data-save-conn");
       const rotateToken = target.getAttribute("data-rotate-token");
       const releaseDevice = target.getAttribute("data-release-device");
       const deleteDevice = target.getAttribute("data-delete-device");
@@ -2700,6 +2923,29 @@
             body: JSON.stringify({ input_config: inputConfig })
           });
           log(`I/O config saved: ${saveIo}`);
+          await loadDevices();
+          return;
+        }
+
+        if (saveConn) {
+          const device = state.devices.find((item) => item && item.id === saveConn);
+          if (!device) {
+            throw new Error("Device not found in dashboard state.");
+          }
+          if (!isAdminUser() && !device.is_owner) {
+            throw new Error("forbidden: Only owner/admin can edit connectivity.");
+          }
+
+          const connectivity = collectConnectivityConfigFromEditor(device);
+          const mergedConfig = mergeConnectivityConfig(device, connectivity);
+          const patchPath = isAdminUser()
+            ? `/api/v1/admin/devices/${encodeURIComponent(saveConn)}`
+            : `/api/v1/devices/${encodeURIComponent(saveConn)}`;
+          await api(patchPath, {
+            method: "PATCH",
+            body: JSON.stringify({ config: mergedConfig })
+          });
+          log(`Connectivity config saved: ${saveConn} (${connectivity.mode})`);
           await loadDevices();
           return;
         }
@@ -2763,6 +3009,12 @@
       const linkedKey = target.getAttribute("data-io-linked");
       if (linkedKey) {
         syncInputRowControls(linkedKey);
+        return;
+      }
+
+      const connModeKey = target.getAttribute("data-conn-mode");
+      if (connModeKey) {
+        syncConnectivityControls(connModeKey);
       }
     });
 
