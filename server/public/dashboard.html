@@ -254,24 +254,177 @@
       padding-bottom: 12px;
     }
 
-    .device-config {
+    .devices-list {
       display: grid;
-      gap: 4px;
-      min-width: 250px;
+      gap: 12px;
+      padding: 8px;
+    }
+
+    .device-card {
+      display: grid;
+      gap: 10px;
+      border: 1px solid #dfe4d7;
+      border-radius: 12px;
+      background: #fbfcf8;
+      padding: 12px;
+    }
+
+    .device-card-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .device-title {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .device-head-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .device-meta-grid {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .device-meta-card {
+      display: grid;
+      gap: 3px;
+      border: 1px solid #e3e8db;
+      border-radius: 10px;
+      background: #fff;
+      padding: 8px;
+      min-height: 72px;
+    }
+
+    .device-meta-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.35px;
+      color: var(--muted);
+    }
+
+    .device-meta-value {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--ink);
+    }
+
+    .device-main-grid,
+    .device-footer-grid {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .device-block {
+      display: grid;
+      gap: 8px;
+      border: 1px solid #e3e8db;
+      border-radius: 10px;
+      background: #fff;
+      padding: 10px;
+    }
+
+    .device-block-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .relay-grid {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    .relay-card {
+      display: grid;
+      gap: 6px;
+      border: 1px solid #e4e9dc;
+      border-radius: 10px;
+      background: #f8faf5;
+      padding: 8px;
+    }
+
+    .relay-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .io-editor {
+      display: grid;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .io-row {
+      display: grid;
+      gap: 6px;
+      border: 1px solid #e2e7da;
+      border-radius: 8px;
+      padding: 6px;
+      background: #f8faf5;
+    }
+
+    .io-row-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .io-row-grid {
+      display: grid;
+      gap: 6px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .io-inline-check {
+      display: flex;
+      align-items: center;
+      gap: 6px;
       font-size: 12px;
+      color: var(--muted);
+    }
+
+    .io-inline-check input {
+      width: auto;
+      margin: 0;
     }
 
     .device-event {
       display: grid;
       gap: 4px;
-      min-width: 220px;
       font-size: 12px;
+    }
+
+    .device-action-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
     }
 
     @media (max-width: 1300px) {
       .layout { grid-template-columns: 1fr; }
       .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .grid.cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .device-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .device-main-grid,
+      .device-footer-grid { grid-template-columns: 1fr; }
     }
 
     @media (max-width: 760px) {
@@ -280,6 +433,10 @@
       .grid.cols-3,
       .kpi-grid { grid-template-columns: 1fr; }
       table { min-width: 560px; }
+      .devices-list { padding: 4px; }
+      .device-meta-grid,
+      .relay-grid,
+      .io-row-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -604,6 +761,7 @@
       });
       if (updated) {
         renderDevices(state.devices);
+        queueRealtimeReload();
       } else {
         queueRealtimeReload();
       }
@@ -1414,6 +1572,190 @@
         : `${inputIdx} ${inputType} -> ${targetRelay}`;
     }
 
+    function normalizedInputConfig(device) {
+      const buttonCount = Number.isInteger(device?.button_count) ? device.button_count : 0;
+      const relayCount = Number.isInteger(device?.relay_count) ? device.relay_count : 0;
+      const existingRows = Array.isArray(device?.input_config) ? device.input_config : [];
+      const byIndex = new Map();
+      for (const row of existingRows) {
+        if (!row || typeof row !== "object") {
+          continue;
+        }
+        if (!Number.isInteger(row.input_index)) {
+          continue;
+        }
+        byIndex.set(row.input_index, row);
+      }
+
+      const normalized = [];
+      for (let i = 0; i < buttonCount; i += 1) {
+        const row = byIndex.get(i) || {};
+        const inputType = row.input_type === "rocker_switch" ? "rocker_switch" : "push_button";
+        const linked = row.linked !== false;
+        const relayFallback = relayCount > 0 ? Math.min(i, relayCount - 1) : null;
+        const targetRelay = Number.isInteger(row.target_relay_index)
+          ? Math.min(Math.max(Number(row.target_relay_index), 0), Math.max(relayCount - 1, 0))
+          : relayFallback;
+
+        normalized.push({
+          input_index: i,
+          input_type: inputType,
+          linked: relayCount > 0 ? linked : false,
+          target_relay_index: relayCount > 0 && linked ? targetRelay : null,
+          rocker_mode: inputType === "rocker_switch"
+            ? (row.rocker_mode === "follow_position" ? "follow_position" : "edge_toggle")
+            : null,
+          invert_input: row.invert_input === true,
+          hold_seconds: inputType === "push_button" && Number.isInteger(row.hold_seconds)
+            ? Number(row.hold_seconds)
+            : null
+        });
+      }
+
+      return normalized;
+    }
+
+    function buildInputConfigEditor(device) {
+      const relayNames = Array.isArray(device?.relay_names) ? device.relay_names : [];
+      const relayCount = Number.isInteger(device?.relay_count) ? device.relay_count : 0;
+      const normalized = normalizedInputConfig(device);
+
+      if (!normalized.length) {
+        return '<div class="muted">no buttons on this device</div>';
+      }
+
+      const rows = normalized.map((row) => {
+        const key = `${device.id}:${row.input_index}`;
+        const inputType = row.input_type === "rocker_switch" ? "rocker_switch" : "push_button";
+        const linked = row.linked === true && relayCount > 0;
+        const follow = inputType === "rocker_switch" && row.rocker_mode === "follow_position";
+        const targetRelay = Number.isInteger(row.target_relay_index) ? row.target_relay_index : 0;
+
+        const relayOptions = relayCount > 0
+          ? Array.from({ length: relayCount }, (_, relayIndex) => {
+              const relayName = typeof relayNames[relayIndex] === "string"
+                ? relayNames[relayIndex]
+                : `Relay ${relayIndex + 1}`;
+              const selected = targetRelay === relayIndex ? "selected" : "";
+              return `<option value="${relayIndex}" ${selected}>R${relayIndex} - ${escapeHtml(relayName)}</option>`;
+            }).join("")
+          : '<option value="">No relays</option>';
+
+        const targetDisabled = relayCount === 0 || !linked;
+        const followDisabled = inputType !== "rocker_switch";
+
+        return `
+          <div class="io-row">
+            <div class="io-row-head">
+              <strong>B${escapeHtml(row.input_index)}</strong>
+              <span class="meta">${escapeHtml(describeInputConfigRow(row))}</span>
+            </div>
+            <div class="io-row-grid">
+              <div>
+                <label>Input Type</label>
+                <select data-io-type="${escapeHtml(key)}">
+                  <option value="push_button" ${inputType === "push_button" ? "selected" : ""}>push_button</option>
+                  <option value="rocker_switch" ${inputType === "rocker_switch" ? "selected" : ""}>rocker_switch</option>
+                </select>
+              </div>
+              <div>
+                <label>Target Relay</label>
+                <select data-io-target="${escapeHtml(key)}" ${targetDisabled ? "disabled" : ""}>
+                  ${relayOptions}
+                </select>
+              </div>
+            </div>
+            <div class="row">
+              <label class="io-inline-check">
+                <input type="checkbox" data-io-linked="${escapeHtml(key)}" ${linked ? "checked" : ""} ${relayCount === 0 ? "disabled" : ""} />
+                linked to relay
+              </label>
+              <label class="io-inline-check">
+                <input type="checkbox" data-io-follow="${escapeHtml(key)}" ${follow ? "checked" : ""} ${followDisabled ? "disabled" : ""} />
+                follow mode (rocker)
+              </label>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      return `<div class="io-editor">${rows}</div>`;
+    }
+
+    function syncInputRowControls(key) {
+      const typeEl = document.querySelector(`[data-io-type="${key}"]`);
+      const linkedEl = document.querySelector(`[data-io-linked="${key}"]`);
+      const targetEl = document.querySelector(`[data-io-target="${key}"]`);
+      const followEl = document.querySelector(`[data-io-follow="${key}"]`);
+
+      if (!(typeEl instanceof HTMLSelectElement)) return;
+      if (!(linkedEl instanceof HTMLInputElement)) return;
+      if (!(targetEl instanceof HTMLSelectElement)) return;
+      if (!(followEl instanceof HTMLInputElement)) return;
+
+      const isRocker = typeEl.value === "rocker_switch";
+      if (!isRocker) {
+        followEl.checked = false;
+      }
+      followEl.disabled = !isRocker;
+
+      const hasRelay = targetEl.options.length > 0 && targetEl.value !== "";
+      targetEl.disabled = !linkedEl.checked || !hasRelay;
+    }
+
+    function collectInputConfigFromEditor(device) {
+      const relayCount = Number.isInteger(device?.relay_count) ? device.relay_count : 0;
+      const normalized = normalizedInputConfig(device);
+      const byIndex = new Map(normalized.map((row) => [row.input_index, row]));
+
+      const payload = [];
+      for (let i = 0; i < normalized.length; i += 1) {
+        const key = `${device.id}:${i}`;
+        const typeEl = document.querySelector(`[data-io-type="${key}"]`);
+        const linkedEl = document.querySelector(`[data-io-linked="${key}"]`);
+        const targetEl = document.querySelector(`[data-io-target="${key}"]`);
+        const followEl = document.querySelector(`[data-io-follow="${key}"]`);
+
+        if (!(typeEl instanceof HTMLSelectElement)) {
+          throw new Error(`Missing type control for button ${i}`);
+        }
+        if (!(linkedEl instanceof HTMLInputElement)) {
+          throw new Error(`Missing linked control for button ${i}`);
+        }
+        if (!(targetEl instanceof HTMLSelectElement)) {
+          throw new Error(`Missing relay control for button ${i}`);
+        }
+        if (!(followEl instanceof HTMLInputElement)) {
+          throw new Error(`Missing follow control for button ${i}`);
+        }
+
+        const current = byIndex.get(i) || {};
+        const inputType = typeEl.value === "rocker_switch" ? "rocker_switch" : "push_button";
+        const linked = relayCount > 0 ? linkedEl.checked : false;
+        const targetRelayParsed = Number.parseInt(targetEl.value, 10);
+        const targetRelay =
+          linked && relayCount > 0 && Number.isInteger(targetRelayParsed)
+            ? Math.min(Math.max(targetRelayParsed, 0), relayCount - 1)
+            : null;
+
+        payload.push({
+          input_index: i,
+          input_type: inputType,
+          linked,
+          target_relay_index: targetRelay,
+          rocker_mode: inputType === "rocker_switch"
+            ? (followEl.checked ? "follow_position" : "edge_toggle")
+            : null,
+          invert_input: current.invert_input === true,
+          hold_seconds: inputType === "push_button" && Number.isInteger(current.hold_seconds)
+            ? Number(current.hold_seconds)
+            : null
+        });
+      }
+
+      return payload;
+    }
+
     function summarizeLastAction(device) {
       const action = device && device.last_action && typeof device.last_action === "object" ? device.last_action : null;
       if (!action) {
@@ -1445,28 +1787,50 @@
     }
 
     function renderDevices(devices) {
-      const rows = devices.map((d) => {
+      if (!Array.isArray(devices) || devices.length === 0) {
+        $("devicesTable").innerHTML = `
+          <div class="devices-list">
+            <div class="device-card">
+              <div class="muted">No devices found.</div>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      const cards = devices.map((d) => {
         const relayNames = Array.isArray(d.relay_names) ? d.relay_names : [];
-        const relayBtns = (Array.isArray(d.relays) ? d.relays : []).map((r) => {
-          const relayName = typeof relayNames[r.relay_index] === "string"
-            ? relayNames[r.relay_index]
-            : `Relay ${Number(r.relay_index) + 1}`;
+        const relayRows = Array.isArray(d.relays) && d.relays.length > 0
+          ? d.relays
+          : Array.from({ length: Math.max(Number(d.relay_count) || 0, 0) }, (_, relayIndex) => ({
+              relay_index: relayIndex,
+              relay_name: typeof relayNames[relayIndex] === "string" ? relayNames[relayIndex] : null,
+              is_on: null
+            }));
+
+        const relayControls = relayRows.map((r) => {
+          const relayIndex = Number(r.relay_index);
+          const relayName = typeof relayNames[relayIndex] === "string"
+            ? relayNames[relayIndex]
+            : `Relay ${relayIndex + 1}`;
+          const relayState = r.is_on === true ? "ON" : r.is_on === false ? "OFF" : "UNKNOWN";
+          const relayBadgeClass = r.is_on === true ? "ok" : r.is_on === false ? "warn" : "";
           return `
-            <div class="row" style="margin-bottom:4px;">
-              <span class="pill ${r.is_on ? "ok" : "warn"}">R${escapeHtml(r.relay_index)}:${r.is_on ? "ON" : "OFF"}</span>
-              <span class="meta">${escapeHtml(relayName)}</span>
-              <button data-relay="${escapeHtml(d.id)}:${escapeHtml(r.relay_index)}:on">On</button>
-              <button data-relay="${escapeHtml(d.id)}:${escapeHtml(r.relay_index)}:off" class="secondary">Off</button>
-              <button data-relay="${escapeHtml(d.id)}:${escapeHtml(r.relay_index)}:toggle" class="warn">Toggle</button>
+            <div class="relay-card">
+              <div class="relay-head">
+                <strong>${escapeHtml(relayName)}</strong>
+                <span class="pill ${relayBadgeClass}">R${escapeHtml(relayIndex)}:${escapeHtml(relayState)}</span>
+              </div>
+              <div class="device-action-row">
+                <button data-relay="${escapeHtml(d.id)}:${escapeHtml(relayIndex)}:on">On</button>
+                <button data-relay="${escapeHtml(d.id)}:${escapeHtml(relayIndex)}:off" class="secondary">Off</button>
+                <button data-relay="${escapeHtml(d.id)}:${escapeHtml(relayIndex)}:toggle" class="warn">Toggle</button>
+              </div>
             </div>
           `;
         }).join("");
 
-        const inputRows = (Array.isArray(d.input_config) ? d.input_config : [])
-          .slice()
-          .sort((a, b) => Number(a?.input_index ?? 0) - Number(b?.input_index ?? 0))
-          .map((row) => `<div>${escapeHtml(describeInputConfigRow(row))}</div>`)
-          .join("");
+        const inputEditor = buildInputConfigEditor(d);
 
         const wsOnline = typeof d.ws_online === "boolean" ? d.ws_online : null;
         const online = wsOnline === null
@@ -1477,61 +1841,97 @@
           : online
             ? '<span class="pill ok">online</span>'
             : '<span class="pill warn">stale/offline</span>';
+        const ownershipBadge = d.owner_user_id
+          ? '<span class="pill ok">claimed</span>'
+          : '<span class="pill warn">unclaimed</span>';
 
         return `
-          <tr>
-            <td>
-              <div><strong>${escapeHtml(d.name)}</strong></div>
-              <div class="meta code">${escapeHtml(d.device_uid)}</div>
-              <div class="meta">model: ${escapeHtml(d.model || "-")} | class: ${escapeHtml(d.device_class || "-")}</div>
-            </td>
-            <td>
-              <div>${escapeHtml(d.owner_email || "unclaimed")}</div>
-              <div class="meta code">owner_id: ${escapeHtml(d.owner_user_id || "-")}</div>
-              <div class="meta code">claim_code: ${escapeHtml(d.claim_code || "-")}</div>
-            </td>
-            <td>
-              <div>fw: ${escapeHtml(d.firmware_version || "-")}</div>
-              <div class="meta">ota: ${escapeHtml(d.ota_channel)}/${escapeHtml(d.ota_security_version)}</div>
-            </td>
-            <td>
-              <div>${statusBadge}</div>
-              <div class="meta">last_seen: ${escapeHtml(d.last_seen_at || "-")}</div>
-              <div class="meta">age: ${escapeHtml(ageLabel(d.last_seen_at))}</div>
-              <div class="meta">ip: ${escapeHtml(d.last_ip || "-")}</div>
-            </td>
-            <td class="device-config">
-              <div class="meta">relays: ${escapeHtml(d.relay_count)} | buttons: ${escapeHtml(d.button_count)}</div>
-              <div class="meta">power_restore: ${escapeHtml(d.power_restore_mode || "-")}</div>
-              ${inputRows || '<div class="muted">no input config</div>'}
-            </td>
-            <td class="device-event">
-              <div><strong>Last action</strong></div>
-              <div>${escapeHtml(summarizeLastAction(d))}</div>
-              <div><strong>Last input</strong></div>
-              <div>${escapeHtml(summarizeLastInputEvent(d))}</div>
-            </td>
-            <td>
-              ${relayBtns}
-              <div class="row" style="margin-top:6px;">
-                <button data-relay-all="${escapeHtml(d.id)}:on">All ON</button>
-                <button data-relay-all="${escapeHtml(d.id)}:off" class="secondary">All OFF</button>
-                <button data-rotate-token="${escapeHtml(d.id)}" class="warn">Rotate Token</button>
-                <button data-release-device="${escapeHtml(d.id)}" class="danger">Release</button>
-                <button data-delete-device="${escapeHtml(d.id)}" class="danger">Delete</button>
+          <article class="device-card">
+            <div class="device-card-head">
+              <div>
+                <h3 class="device-title">${escapeHtml(d.name)}</h3>
+                <div class="device-head-badges">
+                  ${statusBadge}
+                  ${ownershipBadge}
+                  <span class="pill">${escapeHtml(d.device_class || "-")}</span>
+                </div>
+                <div class="meta code">${escapeHtml(d.device_uid)}</div>
+                <div class="meta">model: ${escapeHtml(d.model || "-")}</div>
               </div>
-              ${d.claim_code ? `<div class="row" style="margin-top:6px;"><button data-claim-code="${escapeHtml(d.claim_code)}" class="secondary">Claim This Code</button></div>` : ""}
-            </td>
-          </tr>
+            </div>
+
+            <div class="device-meta-grid">
+              <div class="device-meta-card">
+                <div class="device-meta-label">Ownership</div>
+                <div class="device-meta-value">${escapeHtml(d.owner_email || "unclaimed")}</div>
+                <div class="meta code">owner_id: ${escapeHtml(d.owner_user_id || "-")}</div>
+                <div class="meta code">claim_code: ${escapeHtml(d.claim_code || "-")}</div>
+              </div>
+              <div class="device-meta-card">
+                <div class="device-meta-label">Firmware</div>
+                <div class="device-meta-value">fw: ${escapeHtml(d.firmware_version || "-")}</div>
+                <div class="meta">ota: ${escapeHtml(d.ota_channel)}/${escapeHtml(d.ota_security_version)}</div>
+              </div>
+              <div class="device-meta-card">
+                <div class="device-meta-label">Connectivity</div>
+                <div class="device-meta-value">last_seen: ${escapeHtml(d.last_seen_at || "-")}</div>
+                <div class="meta">age: ${escapeHtml(ageLabel(d.last_seen_at))}</div>
+                <div class="meta">ip: ${escapeHtml(d.last_ip || "-")}</div>
+              </div>
+              <div class="device-meta-card">
+                <div class="device-meta-label">I/O Summary</div>
+                <div class="device-meta-value">relays: ${escapeHtml(d.relay_count)} | buttons: ${escapeHtml(d.button_count)}</div>
+                <div class="meta">power_restore: ${escapeHtml(d.power_restore_mode || "-")}</div>
+              </div>
+            </div>
+
+            <div class="device-main-grid">
+              <section class="device-block">
+                <div class="device-block-title">Relay Controls</div>
+                <div class="relay-grid">
+                  ${relayControls || '<div class="muted">No relay channels reported.</div>'}
+                </div>
+                <div class="device-action-row">
+                  <button data-relay-all="${escapeHtml(d.id)}:on">All ON</button>
+                  <button data-relay-all="${escapeHtml(d.id)}:off" class="secondary">All OFF</button>
+                </div>
+              </section>
+
+              <section class="device-block">
+                <div class="device-block-title">Button Mapping</div>
+                ${inputEditor}
+                <div class="device-action-row">
+                  <button data-save-io="${escapeHtml(d.id)}" class="secondary">Save I/O</button>
+                </div>
+              </section>
+            </div>
+
+            <div class="device-footer-grid">
+              <section class="device-block">
+                <div class="device-block-title">Recent Device Events</div>
+                <div class="device-event">
+                  <div><strong>Last action</strong></div>
+                  <div>${escapeHtml(summarizeLastAction(d))}</div>
+                  <div><strong>Last input</strong></div>
+                  <div>${escapeHtml(summarizeLastInputEvent(d))}</div>
+                </div>
+              </section>
+
+              <section class="device-block">
+                <div class="device-block-title">Device Actions</div>
+                <div class="device-action-row">
+                  <button data-rotate-token="${escapeHtml(d.id)}" class="warn">Rotate Token</button>
+                  <button data-release-device="${escapeHtml(d.id)}" class="danger">Release</button>
+                  <button data-delete-device="${escapeHtml(d.id)}" class="danger">Delete</button>
+                  ${d.claim_code ? `<button data-claim-code="${escapeHtml(d.claim_code)}" class="secondary">Claim This Code</button>` : ""}
+                </div>
+              </section>
+            </div>
+          </article>
         `;
       }).join("");
 
-      $("devicesTable").innerHTML = `
-        <table>
-          <thead><tr><th>Device</th><th>Ownership</th><th>Firmware</th><th>Connectivity</th><th>I/O Config</th><th>Recent Device Events</th><th>Actions</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      `;
+      $("devicesTable").innerHTML = `<div class="devices-list">${cards}</div>`;
     }
 
     function renderSigningKeys(keys) {
@@ -1913,6 +2313,7 @@
 
       const relayCmd = target.getAttribute("data-relay");
       const relayAll = target.getAttribute("data-relay-all");
+      const saveIo = target.getAttribute("data-save-io");
       const rotateToken = target.getAttribute("data-rotate-token");
       const releaseDevice = target.getAttribute("data-release-device");
       const deleteDevice = target.getAttribute("data-delete-device");
@@ -1941,6 +2342,22 @@
             });
           });
           log(`All-relay command sent: ${deviceId} ${action}`);
+          await loadDevices();
+          return;
+        }
+
+        if (saveIo) {
+          const device = state.devices.find((item) => item && item.id === saveIo);
+          if (!device) {
+            throw new Error("Device not found in dashboard state.");
+          }
+
+          const inputConfig = collectInputConfigFromEditor(device);
+          await api(`/api/v1/admin/devices/${encodeURIComponent(saveIo)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ input_config: inputConfig })
+          });
+          log(`I/O config saved: ${saveIo}`);
           await loadDevices();
           return;
         }
@@ -1982,6 +2399,22 @@
         }
       } catch (error) {
         log(`Device action failed: ${error.message}`);
+      }
+    });
+
+    $("devicesTable").addEventListener("change", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+
+      const typeKey = target.getAttribute("data-io-type");
+      if (typeKey) {
+        syncInputRowControls(typeKey);
+        return;
+      }
+
+      const linkedKey = target.getAttribute("data-io-linked");
+      if (linkedKey) {
+        syncInputRowControls(linkedKey);
       }
     });
 

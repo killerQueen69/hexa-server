@@ -4,6 +4,7 @@ import { env } from "../../config/env";
 import { query, withTransaction } from "../../db/connection";
 import { authenticate, requireRole } from "../../http/auth-guards";
 import { sendApiError } from "../../http/api-error";
+import { realtimeHub } from "../../realtime/hub";
 import { metricsService } from "../../services/metrics-service";
 import { opsBackupService } from "../../services/ops-backup-service";
 import { RelayServiceError, relayService } from "../../services/relay-service";
@@ -49,6 +50,21 @@ type DeviceRow = {
   created_at: Date | string;
   updated_at: Date | string;
   relays: unknown;
+};
+
+type InputConfigRow = {
+  input_index: number;
+  input_type: "push_button" | "rocker_switch";
+  linked: boolean;
+  target_relay_index: number | null;
+  rocker_mode: "edge_toggle" | "follow_position" | null;
+  invert_input: boolean;
+  hold_seconds: number | null;
+};
+
+type InputConfigValidationDevice = {
+  relay_count: number;
+  button_count: number;
 };
 
 type AuditRow = {
@@ -122,6 +138,18 @@ const updateDeviceSchema = z.object({
       enabled: z.boolean().default(true)
     })
   ).optional(),
+  input_config: z.array(
+    z.object({
+      input_index: z.number().int().min(0),
+      input_type: z.enum(["push_button", "rocker_switch"]),
+      linked: z.boolean(),
+      target_relay_index: z.number().int().min(0).nullable(),
+      rocker_mode: z.enum(["edge_toggle", "follow_position"]).nullable(),
+      invert_input: z.boolean(),
+      hold_seconds: z.number().int().min(1).max(600).nullable()
+    })
+  ).optional(),
+  power_restore_mode: z.enum(["last_state", "all_off", "all_on"]).optional(),
   ota_channel: z.enum(["dev", "beta", "stable"]).optional(),
   firmware_version: z.string().min(1).max(100).nullable().optional()
 });
@@ -290,6 +318,103 @@ function serializeAudit(row: AuditRow) {
     source: row.source,
     created_at: toIso(row.created_at)
   };
+}
+
+function validateInputConfigMatrix(
+  device: InputConfigValidationDevice,
+  inputConfig: InputConfigRow[]
+): InputConfigRow[] {
+  if (inputConfig.length !== device.button_count) {
+    throw new Error("input_config_size_mismatch");
+  }
+
+  const seen = new Set<number>();
+  for (const cfg of inputConfig) {
+    if (cfg.input_index >= device.button_count) {
+      throw new Error("input_index_out_of_range");
+    }
+
+    if (seen.has(cfg.input_index)) {
+      throw new Error("duplicate_input_index");
+    }
+    seen.add(cfg.input_index);
+
+    if (cfg.linked) {
+      if (!Number.isInteger(cfg.target_relay_index)) {
+        throw new Error("target_relay_required");
+      }
+      if (
+        (cfg.target_relay_index as number) < 0 ||
+        (cfg.target_relay_index as number) >= device.relay_count
+      ) {
+        throw new Error("target_relay_out_of_range");
+      }
+    } else if (cfg.target_relay_index !== null) {
+      throw new Error("target_relay_not_allowed");
+    }
+
+    if (cfg.input_type === "push_button") {
+      if (cfg.rocker_mode !== null) {
+        throw new Error("rocker_mode_not_allowed");
+      }
+    } else {
+      if (cfg.rocker_mode === null) {
+        throw new Error("rocker_mode_required");
+      }
+      if (cfg.hold_seconds !== null) {
+        throw new Error("hold_seconds_not_allowed");
+      }
+    }
+  }
+
+  for (let i = 0; i < device.button_count; i += 1) {
+    if (!seen.has(i)) {
+      throw new Error("missing_input_index");
+    }
+  }
+
+  return [...inputConfig].sort((a, b) => a.input_index - b.input_index);
+}
+
+function normalizeInputConfigError(error: Error): string {
+  switch (error.message) {
+    case "input_config_size_mismatch":
+      return "input_config length must match device button_count.";
+    case "input_index_out_of_range":
+      return "input_index is outside device button range.";
+    case "duplicate_input_index":
+      return "input_index values must be unique.";
+    case "missing_input_index":
+      return "input_config must include every input index from 0..button_count-1.";
+    case "target_relay_required":
+      return "target_relay_index is required when linked is true.";
+    case "target_relay_out_of_range":
+      return "target_relay_index is outside relay range.";
+    case "target_relay_not_allowed":
+      return "target_relay_index must be null when linked is false.";
+    case "rocker_mode_not_allowed":
+      return "rocker_mode must be null for push_button input_type.";
+    case "rocker_mode_required":
+      return "rocker_mode is required for rocker_switch input_type.";
+    case "hold_seconds_not_allowed":
+      return "hold_seconds must be null for rocker_switch input_type.";
+    default:
+      return "Invalid input_config matrix.";
+  }
+}
+
+function pushDeviceConfigUpdate(
+  deviceUid: string,
+  payload: {
+    io_config?: InputConfigRow[];
+    power_restore_mode?: "last_state" | "all_off" | "all_on";
+  }
+): void {
+  realtimeHub.sendToDevice(deviceUid, {
+    type: "config_update",
+    ...payload,
+    ts: nowIso()
+  });
 }
 
 async function userExists(userId: string): Promise<boolean> {
@@ -677,9 +802,17 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
       }
     }
 
-    const updated = await withTransaction(async (client) => {
-      const lookup = await client.query<{ owner_user_id: string | null }>(
-        `SELECT owner_user_id
+    let normalizedInputConfig: InputConfigRow[] | undefined;
+
+    let updated: DeviceRow | null;
+    try {
+      updated = await withTransaction(async (client) => {
+      const lookup = await client.query<{
+        owner_user_id: string | null;
+        relay_count: number;
+        button_count: number;
+      }>(
+        `SELECT owner_user_id, relay_count, button_count
          FROM devices
          WHERE id = $1
          LIMIT 1
@@ -693,6 +826,20 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
       const fields: string[] = [];
       const values: unknown[] = [];
       let nextOwnerId = lookup.rows[0].owner_user_id;
+
+      if (typeof changes.input_config !== "undefined") {
+        try {
+          normalizedInputConfig = validateInputConfigMatrix(
+            {
+              relay_count: lookup.rows[0].relay_count,
+              button_count: lookup.rows[0].button_count
+            },
+            changes.input_config
+          );
+        } catch (error) {
+          throw new Error(`input_config_invalid:${normalizeInputConfigError(error as Error)}`);
+        }
+      }
 
       if (typeof changes.name !== "undefined") {
         values.push(changes.name.trim());
@@ -717,6 +864,14 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
       if (typeof changes.capabilities !== "undefined") {
         values.push(JSON.stringify(changes.capabilities));
         fields.push(`capabilities = $${values.length}::jsonb`);
+      }
+      if (typeof changes.input_config !== "undefined") {
+        values.push(JSON.stringify(normalizedInputConfig ?? changes.input_config));
+        fields.push(`input_config = $${values.length}::jsonb`);
+      }
+      if (typeof changes.power_restore_mode !== "undefined") {
+        values.push(changes.power_restore_mode);
+        fields.push(`power_restore_mode = $${values.length}`);
       }
       if (typeof changes.owner_user_id !== "undefined") {
         values.push(changes.owner_user_id);
@@ -836,11 +991,25 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
          GROUP BY d.id, u.email`,
         [params.id]
       );
-      return full.rows[0] ?? null;
-    });
+        return full.rows[0] ?? null;
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("input_config_invalid:")) {
+        const message = error.message.replace("input_config_invalid:", "") || "Invalid input_config matrix.";
+        return sendApiError(reply, 400, "validation_error", message);
+      }
+      throw error;
+    }
 
     if (!updated) {
       return sendApiError(reply, 404, "not_found", "Device not found.");
+    }
+
+    if (normalizedInputConfig || typeof changes.power_restore_mode !== "undefined") {
+      pushDeviceConfigUpdate(updated.device_uid, {
+        io_config: normalizedInputConfig,
+        power_restore_mode: changes.power_restore_mode
+      });
     }
     return reply.send(serializeDevice(updated));
   });

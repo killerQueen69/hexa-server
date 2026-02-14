@@ -46,6 +46,16 @@ const wsPackage = require("ws") as {
 const DEVICE_WS_HEARTBEAT_INTERVAL_MS = 20_000;
 const DEVICE_WS_HEARTBEAT_MISS_LIMIT = 2;
 
+function broadcastDeviceEvent(ownerUserId: string | null, payload: unknown): void {
+  realtimeHub.broadcastToAudience(
+    {
+      userId: ownerUserId,
+      role: "admin"
+    },
+    payload
+  );
+}
+
 function sendJson(socket: RawWebSocket, payload: unknown): boolean {
   if (socket.readyState !== socket.OPEN) {
     return false;
@@ -231,11 +241,7 @@ function handleDeviceSocket(
 
           void smartHomeService.setDeviceAvailability(deviceUid as string, false);
 
-          if (!owner) {
-            return;
-          }
-
-          realtimeHub.broadcastToUser(owner, {
+          broadcastDeviceEvent(owner, {
             type: "device_offline",
             device_uid: deviceUid,
             ts
@@ -287,24 +293,22 @@ function handleDeviceSocket(
 
     await updateLastSeen(row.id, req.socket.remoteAddress ?? "");
 
-    if (ownerUserId) {
-      const ts = nowIso();
-      void automationService
-        .handleDeviceEvent({
-          type: "device_online",
-          device_uid: row.device_uid,
-          ts
-        })
-        .catch(() => undefined);
-
-      void smartHomeService.setDeviceAvailability(row.device_uid, true);
-
-      realtimeHub.broadcastToUser(ownerUserId, {
+    const ts = nowIso();
+    void automationService
+      .handleDeviceEvent({
         type: "device_online",
         device_uid: row.device_uid,
         ts
-      });
-    }
+      })
+      .catch(() => undefined);
+
+    void smartHomeService.setDeviceAvailability(row.device_uid, true);
+
+    broadcastDeviceEvent(ownerUserId, {
+      type: "device_online",
+      device_uid: row.device_uid,
+      ts
+    });
 
     heartbeat = setInterval(() => {
       if (!authenticated) {
@@ -366,15 +370,13 @@ function handleDeviceSocket(
 
         const owner = await readOwnerUserId(deviceId);
         ownerUserId = owner;
-        if (owner) {
-          realtimeHub.broadcastToUser(owner, {
-            type: "device_state",
-            device_uid: deviceUid,
-            relays,
-            telemetry: typeof message.telemetry === "object" ? message.telemetry : null,
-            ts: syncResult.changedAt
-          });
-        }
+        broadcastDeviceEvent(owner, {
+          type: "device_state",
+          device_uid: deviceUid,
+          relays,
+          telemetry: typeof message.telemetry === "object" ? message.telemetry : null,
+          ts: syncResult.changedAt
+        });
 
         try {
           await smartHomeService.syncRelaySnapshot({
@@ -476,10 +478,7 @@ function handleDeviceSocket(
       void readOwnerUserId(deviceId)
         .then((owner) => {
           ownerUserId = owner;
-          if (!owner) {
-            return;
-          }
-          realtimeHub.broadcastToUser(owner, {
+          broadcastDeviceEvent(owner, {
             ...message,
             device_uid: deviceUid
           });

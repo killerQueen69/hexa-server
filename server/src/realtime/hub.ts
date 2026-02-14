@@ -107,6 +107,32 @@ class RealtimeHub {
     }
   }
 
+  broadcastToRole(role: string, payload: unknown): void {
+    for (const [, session] of this.clients) {
+      if (session.role !== role) {
+        continue;
+      }
+      session.sendJson(payload);
+    }
+  }
+
+  broadcastToAudience(
+    audience: {
+      userId?: string | null;
+      role?: string | null;
+    },
+    payload: unknown
+  ): void {
+    for (const [, session] of this.clients) {
+      const matchesUser = Boolean(audience.userId && session.userId === audience.userId);
+      const matchesRole = Boolean(audience.role && session.role === audience.role);
+      if (!matchesUser && !matchesRole) {
+        continue;
+      }
+      session.sendJson(payload);
+    }
+  }
+
   listOnlineDeviceUids(): string[] {
     return [...this.devices.keys()];
   }
