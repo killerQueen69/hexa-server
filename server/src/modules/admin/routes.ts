@@ -8,7 +8,8 @@ import { realtimeHub } from "../../realtime/hub";
 import { metricsService } from "../../services/metrics-service";
 import { opsBackupService } from "../../services/ops-backup-service";
 import { RelayServiceError, relayService } from "../../services/relay-service";
-import { newId, randomClaimCode, randomToken, sha256 } from "../../utils/crypto";
+import { newId, randomToken, sha256 } from "../../utils/crypto";
+import { deriveStableClaimCode } from "../../utils/claim-code";
 import { nowIso } from "../../utils/time";
 
 type UserRow = {
@@ -738,16 +739,18 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
       }
 
       const now = nowIso();
-      const claimSalt = newId();
       const releasedDevices = await client.query<{ id: string }>(
         `UPDATE devices
          SET owner_user_id = NULL,
-             claim_code = UPPER(SUBSTRING(MD5(device_uid || $2::text || random()::text) FROM 1 FOR 8)),
-             claim_code_created_at = $3,
-             updated_at = $3
+             claim_code = COALESCE(
+               NULLIF(claim_code, ''),
+               UPPER(LPAD(RIGHT(REGEXP_REPLACE(COALESCE(hardware_uid, device_uid), '[^A-Fa-f0-9]', '', 'g'), 8), 8, '0'))
+             ),
+             claim_code_created_at = COALESCE(claim_code_created_at, $2),
+             updated_at = $2
          WHERE owner_user_id = $1
          RETURNING id`,
-        [params.id, claimSalt, now]
+        [params.id, now]
       );
 
       await client.query(`DELETE FROM user_devices WHERE user_id = $1`, [params.id]);
@@ -811,8 +814,12 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
         owner_user_id: string | null;
         relay_count: number;
         button_count: number;
+        claim_code: string | null;
+        claim_code_created_at: Date | string | null;
+        hardware_uid: string | null;
+        device_uid: string;
       }>(
-        `SELECT owner_user_id, relay_count, button_count
+        `SELECT owner_user_id, relay_count, button_count, claim_code, claim_code_created_at, hardware_uid, device_uid
          FROM devices
          WHERE id = $1
          LIMIT 1
@@ -878,15 +885,21 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
         fields.push(`owner_user_id = $${values.length}`);
         nextOwnerId = changes.owner_user_id;
 
-        if (changes.owner_user_id) {
-          values.push(null);
+        if (!changes.owner_user_id) {
+          const claimCode = deriveStableClaimCode({
+            existingClaimCode: lookup.rows[0].claim_code,
+            hardwareUid: lookup.rows[0].hardware_uid,
+            deviceUid: lookup.rows[0].device_uid
+          });
+          const claimCodeCreatedAt = lookup.rows[0].claim_code_created_at
+            ? (lookup.rows[0].claim_code_created_at instanceof Date
+                ? lookup.rows[0].claim_code_created_at.toISOString()
+                : lookup.rows[0].claim_code_created_at)
+            : nowIso();
+
+          values.push(claimCode);
           fields.push(`claim_code = $${values.length}`);
-          values.push(null);
-          fields.push(`claim_code_created_at = $${values.length}`);
-        } else {
-          values.push(randomClaimCode(8));
-          fields.push(`claim_code = $${values.length}`);
-          values.push(nowIso());
+          values.push(claimCodeCreatedAt);
           fields.push(`claim_code_created_at = $${values.length}`);
         }
       }
@@ -1035,10 +1048,15 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
 
   server.post("/devices/:id/release", { preHandler: preHandlers }, async (request, reply) => {
     const params = request.params as { id: string };
-    const claimCode = randomClaimCode(8);
     const released = await withTransaction(async (client) => {
-      const lookup = await client.query<{ id: string }>(
-        `SELECT id
+      const lookup = await client.query<{
+        id: string;
+        device_uid: string;
+        hardware_uid: string | null;
+        claim_code: string | null;
+        claim_code_created_at: Date | string | null;
+      }>(
+        `SELECT id, device_uid, hardware_uid, claim_code, claim_code_created_at
          FROM devices
          WHERE id = $1
          LIMIT 1
@@ -1048,6 +1066,17 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
       if (!lookup.rowCount || lookup.rowCount === 0) {
         return false;
       }
+      const row = lookup.rows[0];
+      const claimCode = deriveStableClaimCode({
+        existingClaimCode: row.claim_code,
+        hardwareUid: row.hardware_uid,
+        deviceUid: row.device_uid
+      });
+      const claimCodeCreatedAt = row.claim_code_created_at
+        ? (row.claim_code_created_at instanceof Date
+            ? row.claim_code_created_at.toISOString()
+            : row.claim_code_created_at)
+        : nowIso();
 
       await client.query(
         `UPDATE devices
@@ -1056,17 +1085,17 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
              claim_code_created_at = $2,
              updated_at = $3
          WHERE id = $4`,
-        [claimCode, nowIso(), nowIso(), params.id]
+        [claimCode, claimCodeCreatedAt, nowIso(), params.id]
       );
       await client.query(`DELETE FROM user_devices WHERE device_id = $1`, [params.id]);
-      return true;
+      return claimCode;
     });
     if (!released) {
       return sendApiError(reply, 404, "not_found", "Device not found.");
     }
     return reply.send({
       ok: true,
-      claim_code: claimCode
+      claim_code: released
     });
   });
 

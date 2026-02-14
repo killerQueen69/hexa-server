@@ -27,6 +27,8 @@ type RelayStateSetRow = {
 
 type RelayAction = "on" | "off" | "toggle";
 type AllRelayAction = "on" | "off";
+const MAX_EFFECTIVE_COMMAND_TIMEOUT_MS = 4_000;
+const MAX_EFFECTIVE_STATE_VERIFY_WINDOW_MS = 800;
 
 export class RelayServiceError extends Error {
   constructor(
@@ -106,7 +108,7 @@ async function resolveTargetState(deviceId: string, relayIndex: number, action: 
 
 function ackErrorCode(error: unknown): string {
   if (error instanceof Error && error.message === "ack_timeout") {
-    return "device_ack_timeout";
+    return "device_unreachable";
   }
   if (error instanceof Error && error.message === "device_disconnected") {
     return "device_disconnected";
@@ -122,11 +124,11 @@ type AckFailure = {
 
 function mapAckError(error: unknown): AckFailure {
   const code = ackErrorCode(error);
-  if (code === "device_ack_timeout") {
+  if (code === "device_unreachable") {
     return {
-      statusCode: 504,
+      statusCode: 409,
       code,
-      message: "Device ACK not received in time."
+      message: "Device is unreachable."
     };
   }
   if (code === "device_disconnected") {
@@ -137,9 +139,9 @@ function mapAckError(error: unknown): AckFailure {
     };
   }
   return {
-    statusCode: 504,
+    statusCode: 409,
     code,
-    message: "Device ACK failed."
+    message: "Device is unreachable."
   };
 }
 
@@ -359,7 +361,7 @@ class RelayService {
     } catch (error) {
       const isTimeout =
         error instanceof RelayServiceError &&
-        (error.code === "device_ack_timeout" || error.statusCode === 504);
+        (error.code === "device_unreachable" || error.statusCode === 504);
       metricsService.observeCommand({
         source: params.source.source,
         scope: "all",
@@ -385,7 +387,7 @@ class RelayService {
     } catch (error) {
       const isTimeout =
         error instanceof RelayServiceError &&
-        (error.code === "device_ack_timeout" || error.statusCode === 504);
+        (error.code === "device_unreachable" || error.statusCode === 504);
       metricsService.observeCommand({
         source: params.source.source,
         scope: "single",
@@ -410,7 +412,12 @@ class RelayService {
 
     const targetState = await resolveTargetState(params.deviceId, params.relayIndex, params.action);
     const commandId = newId();
-    const commandTimeoutMs = params.timeoutMs ?? env.RELAY_COMMAND_TIMEOUT_MS;
+    const requestedTimeoutMs = params.timeoutMs ?? env.RELAY_COMMAND_TIMEOUT_MS;
+    const commandTimeoutMs = Math.min(requestedTimeoutMs, MAX_EFFECTIVE_COMMAND_TIMEOUT_MS);
+    const verifyWindowMs = Math.min(
+      env.RELAY_COMMAND_STATE_VERIFY_WINDOW_MS,
+      MAX_EFFECTIVE_STATE_VERIFY_WINDOW_MS
+    );
     const commandStartedAtMs = Date.now();
     const pendingAck = realtimeHub.createPendingAck(
       commandId,
@@ -445,14 +452,14 @@ class RelayService {
       ack = await pendingAck;
     } catch (error) {
       const mapped = mapAckError(error);
-      if (mapped.code === "device_ack_timeout") {
+      if (mapped.code === "device_unreachable") {
         const observed = await waitForObservedRelayState({
           deviceId: params.deviceId,
           deviceUid: device.device_uid,
           relayIndex: params.relayIndex,
           expectedState: targetState,
           commandStartedAtMs,
-          waitWindowMs: env.RELAY_COMMAND_STATE_VERIFY_WINDOW_MS,
+          waitWindowMs: verifyWindowMs,
           pollMs: env.RELAY_COMMAND_STATE_VERIFY_POLL_MS
         });
 
@@ -467,7 +474,7 @@ class RelayService {
           throw new RelayServiceError(mapped.statusCode, mapped.code, mapped.message, {
             command_id: commandId,
             timeout_ms: commandTimeoutMs,
-            verify_window_ms: env.RELAY_COMMAND_STATE_VERIFY_WINDOW_MS
+            verify_window_ms: verifyWindowMs
           });
         }
       } else {
@@ -557,7 +564,12 @@ class RelayService {
     }
 
     const commandId = newId();
-    const commandTimeoutMs = params.timeoutMs ?? env.RELAY_COMMAND_TIMEOUT_MS;
+    const requestedTimeoutMs = params.timeoutMs ?? env.RELAY_COMMAND_TIMEOUT_MS;
+    const commandTimeoutMs = Math.min(requestedTimeoutMs, MAX_EFFECTIVE_COMMAND_TIMEOUT_MS);
+    const verifyWindowMs = Math.min(
+      env.RELAY_COMMAND_STATE_VERIFY_WINDOW_MS,
+      MAX_EFFECTIVE_STATE_VERIFY_WINDOW_MS
+    );
     const commandStartedAtMs = Date.now();
     const pendingAck = realtimeHub.createPendingAck(
       commandId,
@@ -591,14 +603,14 @@ class RelayService {
       ack = await pendingAck;
     } catch (error) {
       const mapped = mapAckError(error);
-      if (mapped.code === "device_ack_timeout") {
+      if (mapped.code === "device_unreachable") {
         const observed = await waitForObservedAllRelays({
           deviceId: params.deviceId,
           deviceUid: device.device_uid,
           relayCount: device.relay_count,
           expectedState: params.action === "on",
           commandStartedAtMs,
-          waitWindowMs: env.RELAY_COMMAND_STATE_VERIFY_WINDOW_MS,
+          waitWindowMs: verifyWindowMs,
           pollMs: env.RELAY_COMMAND_STATE_VERIFY_POLL_MS
         });
 
@@ -613,7 +625,7 @@ class RelayService {
           throw new RelayServiceError(mapped.statusCode, mapped.code, mapped.message, {
             command_id: commandId,
             timeout_ms: commandTimeoutMs,
-            verify_window_ms: env.RELAY_COMMAND_STATE_VERIFY_WINDOW_MS
+            verify_window_ms: verifyWindowMs
           });
         }
       } else {

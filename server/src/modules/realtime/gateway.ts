@@ -43,8 +43,8 @@ const wsPackage = require("ws") as {
   WebSocketServer: new (args: { noServer: boolean; maxPayload: number }) => RawWebSocketServer;
 };
 
-const DEVICE_WS_HEARTBEAT_INTERVAL_MS = 20_000;
-const DEVICE_WS_HEARTBEAT_MISS_LIMIT = 2;
+const DEVICE_WS_HEARTBEAT_INTERVAL_MS = 2_500;
+const DEVICE_WS_HEARTBEAT_MISS_LIMIT = 1;
 const DEVICE_OFFLINE_GRACE_MS = 5_000;
 const pendingOfflineTimers = new Map<string, NodeJS.Timeout>();
 

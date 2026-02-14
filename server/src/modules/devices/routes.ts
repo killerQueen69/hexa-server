@@ -7,6 +7,7 @@ import { realtimeHub } from "../../realtime/hub";
 import { automationService } from "../../services/automation-service";
 import { RelayServiceError, relayService } from "../../services/relay-service";
 import { newId, randomClaimCode, randomToken, sha256 } from "../../utils/crypto";
+import { deriveStableClaimCode } from "../../utils/claim-code";
 import { nowIso } from "../../utils/time";
 
 type DeviceRow = {
@@ -388,8 +389,6 @@ export async function deviceRoutes(server: FastifyInstance): Promise<void> {
         await client.query(
           `UPDATE devices
            SET owner_user_id = $1,
-               claim_code = NULL,
-               claim_code_created_at = NULL,
                updated_at = $2
            WHERE id = $3`,
           [request.user.sub, now, row.id]
@@ -405,7 +404,7 @@ export async function deviceRoutes(server: FastifyInstance): Promise<void> {
         return {
           ...row,
           owner_user_id: request.user.sub,
-          claim_code: null,
+          claim_code: row.claim_code,
           updated_at: now
         };
       });
@@ -434,11 +433,16 @@ export async function deviceRoutes(server: FastifyInstance): Promise<void> {
   server.post("/:id/release", { preHandler: [authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
     const now = nowIso();
-    const claimCode = randomClaimCode(8);
 
     const released = await withTransaction(async (client) => {
-      const ownerCheck = await client.query<{ id: string; device_uid: string }>(
-        `SELECT id, device_uid
+      const ownerCheck = await client.query<{
+        id: string;
+        device_uid: string;
+        hardware_uid: string | null;
+        claim_code: string | null;
+        claim_code_created_at: Date | string | null;
+      }>(
+        `SELECT id, device_uid, hardware_uid, claim_code, claim_code_created_at
          FROM devices
          WHERE id = $1
            AND owner_user_id = $2
@@ -450,6 +454,16 @@ export async function deviceRoutes(server: FastifyInstance): Promise<void> {
       if (!row) {
         return null;
       }
+      const claimCode = deriveStableClaimCode({
+        existingClaimCode: row.claim_code,
+        hardwareUid: row.hardware_uid,
+        deviceUid: row.device_uid
+      });
+      const claimCodeCreatedAt = row.claim_code_created_at
+        ? (row.claim_code_created_at instanceof Date
+            ? row.claim_code_created_at.toISOString()
+            : row.claim_code_created_at)
+        : now;
 
       await client.query(
         `UPDATE devices
@@ -458,11 +472,14 @@ export async function deviceRoutes(server: FastifyInstance): Promise<void> {
              claim_code_created_at = $2,
              updated_at = $3
          WHERE id = $4`,
-        [claimCode, now, now, params.id]
+        [claimCode, claimCodeCreatedAt, now, params.id]
       );
       await client.query("DELETE FROM user_devices WHERE device_id = $1", [params.id]);
 
-      return row;
+      return {
+        ...row,
+        claim_code: claimCode
+      };
     });
 
     if (!released) {
@@ -471,7 +488,7 @@ export async function deviceRoutes(server: FastifyInstance): Promise<void> {
 
     return reply.send({
       ok: true,
-      claim_code: claimCode
+      claim_code: released.claim_code
     });
   });
 

@@ -4,6 +4,7 @@ import { env } from "../../config/env";
 import { query, withTransaction } from "../../db/connection";
 import { sendApiError } from "../../http/api-error";
 import { newId, randomToken, sha256 } from "../../utils/crypto";
+import { deriveStableClaimCode } from "../../utils/claim-code";
 
 type DeviceProvisionRow = {
   id: string;
@@ -78,24 +79,6 @@ function normalizeCapabilities(
   return defaultCapabilities(deviceClass, relayCount);
 }
 
-function extractHex(input: string): string {
-  return input.replace(/[^a-fA-F0-9]/g, "").toUpperCase();
-}
-
-function deriveClaimCode(mac: string | undefined, hardwareUid: string): string {
-  const macHex = extractHex(mac ?? "");
-  if (macHex.length >= 8) {
-    return macHex.slice(-8);
-  }
-
-  const hwHex = extractHex(hardwareUid);
-  if (hwHex.length >= 8) {
-    return hwHex.slice(-8);
-  }
-
-  return hwHex.padStart(8, "0").slice(-8);
-}
-
 async function allocateDeviceUid(
   client: {
     query: <T = unknown>(sql: string, params?: unknown[]) => Promise<{ rows: T[]; rowCount: number | null }>;
@@ -137,8 +120,11 @@ export async function provisionRoutes(server: FastifyInstance): Promise<void> {
       payload.relay_count,
       payload.capabilities
     );
-    const derivedClaimCode = deriveClaimCode(payload.mac, hardwareUid);
-    const provisionClaimCode = payload.claim_code?.trim().toUpperCase() ?? derivedClaimCode;
+    const provisionClaimCode = deriveStableClaimCode({
+      existingClaimCode: payload.claim_code,
+      hardwareUid,
+      mac: payload.mac
+    });
     const rawToken = randomToken(32);
     const tokenHash = sha256(rawToken);
     const now = new Date();
@@ -155,7 +141,12 @@ export async function provisionRoutes(server: FastifyInstance): Promise<void> {
       const row = existing.rows[0];
 
       if (row) {
-        const claimCode = row.owner_user_id ? null : provisionClaimCode;
+        const claimCode = deriveStableClaimCode({
+          existingClaimCode: row.claim_code ?? provisionClaimCode,
+          hardwareUid,
+          deviceUid: row.device_uid,
+          mac: payload.mac
+        });
         await client.query(
           `UPDATE devices
            SET device_token_hash = $1,
@@ -171,11 +162,11 @@ export async function provisionRoutes(server: FastifyInstance): Promise<void> {
                END,
                claim_code = CASE
                  WHEN owner_user_id IS NULL THEN $9
-                 ELSE NULL
+                 ELSE claim_code
                END,
                claim_code_created_at = CASE
-                 WHEN owner_user_id IS NULL THEN $10
-                 ELSE NULL
+                 WHEN owner_user_id IS NULL THEN COALESCE(claim_code_created_at, $10)
+                 ELSE claim_code_created_at
                END,
                updated_at = $11
            WHERE id = $12`,
@@ -198,14 +189,19 @@ export async function provisionRoutes(server: FastifyInstance): Promise<void> {
         return {
           deviceId: row.id,
           deviceUid: row.device_uid,
-          claimCode,
+          claimCode: row.owner_user_id ? null : claimCode,
           claimed: row.owner_user_id !== null
         };
       }
 
       const deviceId = newId();
       const deviceUid = await allocateDeviceUid(client, hardwareUid);
-      const claimCode = provisionClaimCode;
+      const claimCode = deriveStableClaimCode({
+        existingClaimCode: provisionClaimCode,
+        hardwareUid,
+        deviceUid,
+        mac: payload.mac
+      });
       const relayNames = buildRelayNames(payload.relay_count);
 
       await client.query(

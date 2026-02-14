@@ -178,8 +178,6 @@ export async function authRoutes(server: FastifyInstance): Promise<void> {
           await client.query(
             `UPDATE devices
              SET owner_user_id = $1,
-                 claim_code = NULL,
-                 claim_code_created_at = NULL,
                  updated_at = $2
              WHERE id = $3`,
             [user.id, nowIso(), claimRow.id]

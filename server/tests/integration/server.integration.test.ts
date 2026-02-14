@@ -1076,8 +1076,8 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
         action: "on"
       })
     });
-    assert.equal(timeoutCommand.status, 504);
-    assert.equal(timeoutCommand.body.code, "device_ack_timeout");
+    assert.equal(timeoutCommand.status, 409);
+    assert.equal(timeoutCommand.body.code, "device_unreachable");
 
     await waitUntil(async () => {
       return (timeoutDeviceWs?.commandCount ?? 0) > 0;
