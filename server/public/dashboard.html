@@ -277,6 +277,21 @@
       gap: 10px;
     }
 
+    .device-head-actions {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .device-card-body {
+      display: grid;
+      gap: 10px;
+    }
+
+    .device-card.is-collapsed {
+      gap: 0;
+    }
+
     .device-title {
       margin: 0;
       font-size: 18px;
@@ -569,6 +584,7 @@
         </div>
         <div class="row">
           <input id="claimCodeInput" placeholder="claim code (current logged user)" style="max-width: 250px;" />
+          <input id="devicesSearchInput" placeholder="search by name, uid, model, owner..." style="max-width: 320px;" />
           <button id="claimDeviceBtn" class="secondary">Claim By Code</button>
           <button id="refreshDevicesBtn" class="ghost">Refresh Devices</button>
         </div>
@@ -706,6 +722,7 @@
     const $ = (id) => document.getElementById(id);
     const SESSION_STORAGE_KEY = "hexa_admin_dashboard_session_v2";
     const COLLAPSE_STORAGE_KEY = "hexa_admin_dashboard_collapsed_v1";
+    const DEVICE_COLLAPSE_STORAGE_KEY = "hexa_admin_dashboard_device_collapsed_v1";
 
     const state = {
       accessToken: "",
@@ -717,7 +734,10 @@
       preferences: null,
       refreshPromise: null,
       collapsedCards: {},
+      collapsedDeviceCards: {},
+      deviceSearchQuery: "",
       pendingDeviceActions: new Map(),
+      pendingRealtimeCommands: new Map(),
       realtimeSocket: null,
       realtimeAuthed: false,
       realtimeUrl: "",
@@ -1060,6 +1080,7 @@
       clearRealtimeReloadTimer();
       state.realtimeReconnectAttempt = 0;
       state.realtimeAuthed = false;
+      rejectPendingRealtimeCommands("channel_stopped");
 
       const socket = state.realtimeSocket;
       state.realtimeSocket = null;
@@ -1156,10 +1177,14 @@
         return;
       }
 
-      if (type === "cmd_ack" && message.ok === false) {
-        const code = typeof message.code === "string" ? message.code : "command_failed";
-        const detail = typeof message.message === "string" ? message.message : "";
-        log(`Realtime command failed: ${code}${detail ? ` (${detail})` : ""}`);
+      if (type === "cmd_ack") {
+        const consumed = resolveRealtimeCommandAck(message);
+        if (!consumed && message.ok === false) {
+          const code = typeof message.code === "string" ? message.code : "command_failed";
+          const detail = typeof message.message === "string" ? message.message : "";
+          log(`Realtime command failed: ${code}${detail ? ` (${detail})` : ""}`);
+        }
+        return;
       }
     }
 
@@ -1212,6 +1237,7 @@
         }
         state.realtimeSocket = null;
         state.realtimeAuthed = false;
+        rejectPendingRealtimeCommands(`close_${event.code}`);
         if (state.user && state.accessToken) {
           scheduleRealtimeReconnect(`code ${event.code}`);
         }
@@ -1313,6 +1339,110 @@
       if (stored && typeof stored === "object" && !Array.isArray(stored)) {
         state.collapsedCards = stored;
       }
+    }
+
+    function persistCollapsedDeviceCards() {
+      localStorage.setItem(
+        DEVICE_COLLAPSE_STORAGE_KEY,
+        JSON.stringify(state.collapsedDeviceCards || {})
+      );
+    }
+
+    function loadCollapsedDeviceCards() {
+      const stored = safeParseJson(localStorage.getItem(DEVICE_COLLAPSE_STORAGE_KEY), {});
+      if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+        state.collapsedDeviceCards = stored;
+      }
+    }
+
+    function makeRealtimeRequestId(prefix = "cmd") {
+      const rand = Math.random().toString(36).slice(2, 8);
+      return `${prefix}-${Date.now()}-${rand}`;
+    }
+
+    function currentUserOwnsDevice(device) {
+      if (!device || typeof device !== "object") {
+        return false;
+      }
+      if (device.is_owner === true) {
+        return true;
+      }
+      const userId = state.user && typeof state.user.id === "string" ? state.user.id : "";
+      return Boolean(userId && typeof device.owner_user_id === "string" && device.owner_user_id === userId);
+    }
+
+    function rejectPendingRealtimeCommands(reason) {
+      const suffix = reason ? ` (${reason})` : "";
+      for (const [requestId, pending] of state.pendingRealtimeCommands.entries()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error(`realtime_disconnected${suffix}`));
+        state.pendingRealtimeCommands.delete(requestId);
+      }
+    }
+
+    function resolveRealtimeCommandAck(message) {
+      const requestId = typeof message.request_id === "string" ? message.request_id : "";
+      if (!requestId) {
+        return false;
+      }
+      const pending = state.pendingRealtimeCommands.get(requestId);
+      if (!pending) {
+        return false;
+      }
+      clearTimeout(pending.timer);
+      state.pendingRealtimeCommands.delete(requestId);
+
+      if (message.ok === false) {
+        const code = typeof message.code === "string" ? message.code : "command_failed";
+        const detail = typeof message.message === "string" ? message.message : "";
+        pending.reject(new Error(`${code}${detail ? `: ${detail}` : ""}`));
+        return true;
+      }
+
+      pending.resolve(message.result ?? null);
+      return true;
+    }
+
+    function sendRealtimeCommand(commandPayload, options = {}) {
+      const socket = state.realtimeSocket;
+      if (!socket || socket.readyState !== WebSocket.OPEN || !state.realtimeAuthed) {
+        throw new Error("Realtime channel is not connected.");
+      }
+
+      const timeoutMs =
+        typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
+          ? Math.max(2000, Math.floor(options.timeoutMs))
+          : 32000;
+      const requestId =
+        typeof options.requestId === "string" && options.requestId.trim()
+          ? options.requestId.trim()
+          : makeRealtimeRequestId("ws");
+      const frame = {
+        ...commandPayload,
+        type: "cmd",
+        request_id: requestId
+      };
+
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          state.pendingRealtimeCommands.delete(requestId);
+          reject(new Error("command_timeout"));
+        }, timeoutMs);
+
+        state.pendingRealtimeCommands.set(requestId, {
+          resolve,
+          reject,
+          timer
+        });
+
+        try {
+          socket.send(JSON.stringify(frame));
+        } catch (error) {
+          clearTimeout(timer);
+          state.pendingRealtimeCommands.delete(requestId);
+          reject(error instanceof Error ? error : new Error("realtime_send_failed"));
+        }
+      });
     }
 
     function persistSession() {
@@ -2216,8 +2346,33 @@
       return `<div class="button-state-grid">${chips.join("")}</div>`;
     }
 
+    function deviceMatchesSearch(device, query) {
+      if (!query) {
+        return true;
+      }
+
+      const relayNames = Array.isArray(device?.relay_names) ? device.relay_names.join(" ") : "";
+      const fields = [
+        device?.id,
+        device?.name,
+        device?.device_uid,
+        device?.hardware_uid,
+        device?.model,
+        device?.device_class,
+        device?.owner_email,
+        device?.owner_user_id,
+        device?.claim_code,
+        device?.firmware_version,
+        device?.ota_channel,
+        device?.last_ip,
+        relayNames
+      ];
+      return fields.some((field) => String(field ?? "").toLowerCase().includes(query));
+    }
+
     function renderDevices(devices) {
-      if (!Array.isArray(devices) || devices.length === 0) {
+      const allDevices = Array.isArray(devices) ? devices : [];
+      if (allDevices.length === 0) {
         $("devicesTable").innerHTML = `
           <div class="devices-list">
             <div class="device-card">
@@ -2228,9 +2383,28 @@
         return;
       }
 
-      const cards = devices.map((d) => {
+      const searchQuery = String(state.deviceSearchQuery || "").trim().toLowerCase();
+      const visibleDevices = searchQuery
+        ? allDevices.filter((device) => deviceMatchesSearch(device, searchQuery))
+        : allDevices;
+
+      if (visibleDevices.length === 0) {
+        $("devicesTable").innerHTML = `
+          <div class="devices-list">
+            <div class="device-card">
+              <div class="muted">No devices match "${escapeHtml(String(state.deviceSearchQuery || "").trim())}".</div>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      const cards = visibleDevices.map((d) => {
         const admin = isAdminUser();
         initializeDeviceButtonStates(d);
+        const cardKey = String(d.id || d.device_uid || "");
+        const isCollapsed = Boolean(state.collapsedDeviceCards[cardKey]);
+        const isOwner = currentUserOwnsDevice(d);
         const relayNames = Array.isArray(d.relay_names) ? d.relay_names : [];
         const relayRows = Array.isArray(d.relays) && d.relays.length > 0
           ? d.relays
@@ -2275,13 +2449,13 @@
           ? '<span class="pill bad">inactive</span>'
           : online
             ? '<span class="pill ok">online</span>'
-            : '<span class="pill warn">stale/offline</span>';
+          : '<span class="pill warn">stale/offline</span>';
         const ownershipBadge = d.owner_user_id
           ? '<span class="pill ok">claimed</span>'
           : '<span class="pill warn">unclaimed</span>';
 
         return `
-          <article class="device-card">
+          <article class="device-card ${isCollapsed ? "is-collapsed" : ""}" data-device-id="${escapeHtml(d.id)}">
             <div class="device-card-head">
               <div>
                 <h3 class="device-title">${escapeHtml(d.name)}</h3>
@@ -2293,86 +2467,114 @@
                 <div class="meta code">${escapeHtml(d.device_uid)}</div>
                 <div class="meta">model: ${escapeHtml(d.model || "-")}</div>
               </div>
-            </div>
-
-            <div class="device-meta-grid">
-              <div class="device-meta-card">
-                <div class="device-meta-label">Ownership</div>
-                <div class="device-meta-value">${escapeHtml(d.owner_email || "unclaimed")}</div>
-                <div class="meta code">owner_id: ${escapeHtml(d.owner_user_id || "-")}</div>
-                <div class="meta code">claim_code: ${escapeHtml(d.claim_code || "-")}</div>
-              </div>
-              <div class="device-meta-card">
-                <div class="device-meta-label">Firmware</div>
-                <div class="device-meta-value">fw: ${escapeHtml(d.firmware_version || "-")}</div>
-                <div class="meta">ota: ${escapeHtml(d.ota_channel)}/${escapeHtml(d.ota_security_version)}</div>
-              </div>
-              <div class="device-meta-card">
-                <div class="device-meta-label">Connectivity</div>
-                <div class="device-meta-value">last_seen: ${escapeHtml(formatIsoWithOffset(d.last_seen_at))}</div>
-                <div class="meta">age: ${escapeHtml(ageLabel(d.last_seen_at))}</div>
-                <div class="meta">ip: ${escapeHtml(d.last_ip || "-")}</div>
-                <div class="meta">mode: ${escapeHtml(connectivityConfig.mode)}</div>
-                <div class="meta">broker: ${escapeHtml(connectivityConfig.mqtt.host || "-")}:${escapeHtml(connectivityConfig.mqtt.port)}</div>
-              </div>
-              <div class="device-meta-card">
-                <div class="device-meta-label">I/O Summary</div>
-                <div class="device-meta-value">relays: ${escapeHtml(d.relay_count)} | buttons: ${escapeHtml(d.button_count)}</div>
-                <div class="meta">power_restore: ${escapeHtml(d.power_restore_mode || "-")}</div>
+              <div class="device-head-actions">
+                <button class="collapse-toggle" data-device-collapse="${escapeHtml(cardKey)}">${isCollapsed ? "Expand" : "Collapse"}</button>
               </div>
             </div>
 
-            <div class="device-main-grid">
-              <section class="device-block">
-                <div class="device-block-title">Relay Controls</div>
-                <div class="relay-grid">
-                  ${relayControls || '<div class="muted">No relay channels reported.</div>'}
+            <div class="device-card-body" ${isCollapsed ? "hidden" : ""}>
+              <div class="device-meta-grid">
+                <div class="device-meta-card">
+                  <div class="device-meta-label">Ownership</div>
+                  <div class="device-meta-value">${escapeHtml(d.owner_email || "unclaimed")}</div>
+                  <div class="meta code">owner_id: ${escapeHtml(d.owner_user_id || "-")}</div>
+                  <div class="meta code">claim_code: ${escapeHtml(d.claim_code || "-")}</div>
                 </div>
-                <div class="device-action-row">
-                  <button data-relay-all="${escapeHtml(d.id)}:on">All ON</button>
-                  <button data-relay-all="${escapeHtml(d.id)}:off" class="secondary">All OFF</button>
+                <div class="device-meta-card">
+                  <div class="device-meta-label">Firmware</div>
+                  <div class="device-meta-value">fw: ${escapeHtml(d.firmware_version || "-")}</div>
+                  <div class="meta">ota: ${escapeHtml(d.ota_channel || "-")}/${escapeHtml(d.ota_security_version || "-")}</div>
                 </div>
-              </section>
+                <div class="device-meta-card">
+                  <div class="device-meta-label">Connectivity</div>
+                  <div class="device-meta-value">last_seen: ${escapeHtml(formatIsoWithOffset(d.last_seen_at))}</div>
+                  <div class="meta">age: ${escapeHtml(ageLabel(d.last_seen_at))}</div>
+                  <div class="meta">ip: ${escapeHtml(d.last_ip || "-")}</div>
+                  <div class="meta">mode: ${escapeHtml(connectivityConfig.mode)}</div>
+                  <div class="meta">broker: ${escapeHtml(connectivityConfig.mqtt.host || "-")}:${escapeHtml(connectivityConfig.mqtt.port)}</div>
+                </div>
+                <div class="device-meta-card">
+                  <div class="device-meta-label">I/O Summary</div>
+                  <div class="device-meta-value">relays: ${escapeHtml(d.relay_count)} | buttons: ${escapeHtml(d.button_count)}</div>
+                  <div class="meta">power_restore: ${escapeHtml(d.power_restore_mode || "-")}</div>
+                </div>
+              </div>
 
-              <section class="device-block">
-                <div class="device-block-title">Button Mapping</div>
-                ${buttonStates}
-                ${admin ? inputEditor : '<div class="muted">Button mapping edit is admin only.</div>'}
-                ${admin ? `
-                <div class="device-action-row">
-                  <button data-save-io="${escapeHtml(d.id)}" class="secondary">Save I/O</button>
-                </div>` : ""}
-              </section>
+              <div class="device-main-grid">
+                <section class="device-block">
+                  <div class="device-block-title">Relay Controls</div>
+                  <div class="relay-grid">
+                    ${relayControls || '<div class="muted">No relay channels reported.</div>'}
+                  </div>
+                  <div class="device-action-row">
+                    <button data-relay-all="${escapeHtml(d.id)}:on">All ON</button>
+                    <button data-relay-all="${escapeHtml(d.id)}:off" class="secondary">All OFF</button>
+                  </div>
+                </section>
 
-              <section class="device-block">
-                <div class="device-block-title">Connectivity Mode</div>
-                ${connectivityEditor}
-                <div class="device-action-row">
-                  <button data-save-conn="${escapeHtml(d.id)}" class="secondary" ${(admin || d.is_owner) ? "" : "disabled"}>Save Connectivity</button>
-                </div>
-              </section>
-            </div>
+                <section class="device-block">
+                  <div class="device-block-title">Button Mapping</div>
+                  ${buttonStates}
+                  ${admin ? inputEditor : '<div class="muted">Button mapping edit is admin only.</div>'}
+                  ${admin ? `
+                  <div class="device-action-row">
+                    <button data-save-io="${escapeHtml(d.id)}" class="secondary">Save I/O</button>
+                  </div>` : ""}
+                </section>
 
-            <div class="device-footer-grid">
-              <section class="device-block">
-                <div class="device-block-title">Recent Device Events</div>
-                <div class="device-event">
-                  <div><strong>Last action</strong></div>
-                  <div>${escapeHtml(summarizeLastAction(d))}</div>
-                  <div><strong>Last input</strong></div>
-                  <div>${escapeHtml(summarizeLastInputEvent(d))}</div>
-                </div>
-              </section>
+                <section class="device-block">
+                  <div class="device-block-title">Connectivity Mode</div>
+                  ${connectivityEditor}
+                  <div class="device-action-row">
+                    <button data-save-conn="${escapeHtml(d.id)}" class="secondary" ${(admin || d.is_owner) ? "" : "disabled"}>Save Connectivity</button>
+                  </div>
+                </section>
+              </div>
 
-              <section class="device-block">
-                <div class="device-block-title">Device Actions</div>
-                <div class="device-action-row">
-                  <button data-rotate-token="${escapeHtml(d.id)}" class="warn">Rotate Token</button>
-                  <button data-release-device="${escapeHtml(d.id)}" class="danger">Release</button>
-                  <button data-delete-device="${escapeHtml(d.id)}" class="danger">Delete</button>
-                  ${d.claim_code ? `<button data-claim-code="${escapeHtml(d.claim_code)}" class="secondary">Claim This Code</button>` : ""}
-                </div>
-              </section>
+              <div class="device-footer-grid">
+                <section class="device-block">
+                  <div class="device-block-title">Recent Device Events</div>
+                  <div class="device-event">
+                    <div><strong>Last action</strong></div>
+                    <div>${escapeHtml(summarizeLastAction(d))}</div>
+                    <div><strong>Last input</strong></div>
+                    <div>${escapeHtml(summarizeLastInputEvent(d))}</div>
+                  </div>
+                </section>
+
+                <section class="device-block">
+                  <div class="device-block-title">Device Actions</div>
+                  <div class="device-action-row">
+                    <button data-rotate-token="${escapeHtml(d.id)}" class="warn">Rotate Token</button>
+                    <button data-release-device="${escapeHtml(d.id)}" class="danger">Release</button>
+                    <button data-delete-device="${escapeHtml(d.id)}" class="danger">Delete</button>
+                    ${d.claim_code ? `<button data-claim-code="${escapeHtml(d.claim_code)}" class="secondary">Claim This Code</button>` : ""}
+                  </div>
+                  <div class="grid cols-2">
+                    <div>
+                      <label>Wi-Fi SSID</label>
+                      <input data-wifi-ssid placeholder="example-wifi-name" />
+                    </div>
+                    <div>
+                      <label>Wi-Fi Password</label>
+                      <input data-wifi-password type="password" placeholder="optional for open network" />
+                    </div>
+                  </div>
+                  <label class="io-inline-check">
+                    <input type="checkbox" data-wifi-reboot checked />
+                    Reboot device after Wi-Fi update
+                  </label>
+                  <div class="device-action-row">
+                    <button data-wifi-set="${escapeHtml(d.id)}" class="secondary" ${isOwner ? "" : "disabled"}>Set Wi-Fi</button>
+                    <button data-wifi-clear="${escapeHtml(d.id)}" class="warn" ${isOwner ? "" : "disabled"}>Clear Wi-Fi</button>
+                  </div>
+                  <div class="meta">
+                    ${isOwner
+                      ? "Wi-Fi commands use realtime channel and require the device to be online."
+                      : "Only the current owner can send Wi-Fi set/clear commands."}
+                  </div>
+                </section>
+              </div>
             </div>
           </article>
         `;
@@ -2654,6 +2856,11 @@
       try { await loadDevices(); log("Devices refreshed."); } catch (error) { log(`Devices refresh failed: ${error.message}`); }
     });
 
+    $("devicesSearchInput").addEventListener("input", () => {
+      state.deviceSearchQuery = $("devicesSearchInput").value || "";
+      renderDevices(state.devices);
+    });
+
     $("claimDeviceBtn").addEventListener("click", async () => {
       try { await claimDeviceByCode($("claimCodeInput").value || ""); } catch (error) { log(`Claim failed: ${error.message}`); }
     });
@@ -2866,6 +3073,7 @@
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
 
+      const deviceCollapse = target.getAttribute("data-device-collapse");
       const relayCmd = target.getAttribute("data-relay");
       const relayAll = target.getAttribute("data-relay-all");
       const saveIo = target.getAttribute("data-save-io");
@@ -2874,8 +3082,81 @@
       const releaseDevice = target.getAttribute("data-release-device");
       const deleteDevice = target.getAttribute("data-delete-device");
       const claimCode = target.getAttribute("data-claim-code");
+      const wifiSet = target.getAttribute("data-wifi-set");
+      const wifiClear = target.getAttribute("data-wifi-clear");
 
       try {
+        if (deviceCollapse) {
+          const nextCollapsed = !Boolean(state.collapsedDeviceCards[deviceCollapse]);
+          state.collapsedDeviceCards[deviceCollapse] = nextCollapsed;
+          persistCollapsedDeviceCards();
+          renderDevices(state.devices);
+          return;
+        }
+
+        if (wifiSet || wifiClear) {
+          const deviceId = wifiSet || wifiClear || "";
+          if (!deviceId) {
+            throw new Error("Missing device id for Wi-Fi command.");
+          }
+
+          const device = state.devices.find((item) => item && item.id === deviceId);
+          if (!device) {
+            throw new Error("Device not found in dashboard state.");
+          }
+          if (!currentUserOwnsDevice(device)) {
+            throw new Error("forbidden: Only the current device owner can send Wi-Fi commands.");
+          }
+
+          const card = target.closest(".device-card");
+          const rebootEl = card ? card.querySelector("[data-wifi-reboot]") : null;
+          const reboot = rebootEl instanceof HTMLInputElement ? rebootEl.checked : true;
+
+          const wifiPayload = wifiSet
+            ? {
+                op: "set",
+                reboot
+              }
+            : {
+                op: "clear",
+                reboot
+              };
+
+          if (wifiSet) {
+            const ssidEl = card ? card.querySelector("[data-wifi-ssid]") : null;
+            const passwordEl = card ? card.querySelector("[data-wifi-password]") : null;
+            const ssid = ssidEl instanceof HTMLInputElement ? ssidEl.value.trim() : "";
+            const password = passwordEl instanceof HTMLInputElement ? passwordEl.value : "";
+            if (!ssid) {
+              throw new Error("Wi-Fi SSID is required for set.");
+            }
+            wifiPayload.ssid = ssid;
+            wifiPayload.password = password;
+          }
+
+          await withDeviceActionLock(deviceId, async () => {
+            await sendRealtimeCommand(
+              {
+                device_id: deviceId,
+                scope: "wifi",
+                wifi: wifiPayload
+              },
+              { timeoutMs: 32000 }
+            );
+          });
+
+          if (wifiSet) {
+            const passwordEl = card ? card.querySelector("[data-wifi-password]") : null;
+            if (passwordEl instanceof HTMLInputElement) {
+              passwordEl.value = "";
+            }
+            log(`Wi-Fi set command sent: ${deviceId}${reboot ? " (reboot=true)" : ""}`);
+          } else {
+            log(`Wi-Fi clear command sent: ${deviceId}${reboot ? " (reboot=true)" : ""}`);
+          }
+          return;
+        }
+
         if (relayCmd) {
           const [deviceId, idx, action] = relayCmd.split(":");
           const relayPath = isAdminUser()
@@ -3049,6 +3330,7 @@
     });
 
     loadCollapsedCards();
+    loadCollapsedDeviceCards();
     setupCollapsibleCards();
     restoreSession();
     setAuthState();
