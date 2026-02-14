@@ -1188,6 +1188,52 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
     return reply.send(result.rows.map((row) => serializeAudit(row)));
   });
 
+  server.delete("/audit", { preHandler: preHandlers }, async (request, reply) => {
+    const queryParams = request.query as {
+      device_id?: string;
+      source?: string;
+      action?: string;
+    };
+
+    const filters: string[] = [];
+    const values: unknown[] = [];
+
+    if (queryParams.device_id) {
+      values.push(queryParams.device_id);
+      filters.push(`device_id = $${values.length}`);
+    }
+    if (queryParams.source) {
+      values.push(queryParams.source);
+      filters.push(`source = $${values.length}`);
+    }
+    if (queryParams.action) {
+      values.push(queryParams.action);
+      filters.push(`action = $${values.length}`);
+    }
+
+    const whereClause = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+    const deleted = await query<{ total: string }>(
+      `WITH removed AS (
+         DELETE FROM audit_log
+         ${whereClause}
+         RETURNING 1
+       )
+       SELECT COUNT(*)::text AS total
+       FROM removed`,
+      values
+    );
+
+    return reply.send({
+      ok: true,
+      deleted: Number(deleted.rows[0]?.total ?? "0"),
+      filters: {
+        device_id: queryParams.device_id ?? null,
+        source: queryParams.source ?? null,
+        action: queryParams.action ?? null
+      }
+    });
+  });
+
   server.get("/ops/backup/policy", { preHandler: preHandlers }, async (_request, reply) => {
     return reply.send(opsBackupService.getPolicy());
   });

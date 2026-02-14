@@ -418,6 +418,36 @@
       gap: 8px;
     }
 
+    .button-state-grid {
+      display: grid;
+      gap: 6px;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    }
+
+    .button-state-chip {
+      display: grid;
+      gap: 2px;
+      border: 1px solid #dce2d3;
+      border-radius: 8px;
+      background: #f8faf5;
+      padding: 6px 8px;
+    }
+
+    .button-state-chip.pressed {
+      border-color: #efcbc6;
+      background: #f7e2df;
+    }
+
+    .button-state-chip.released {
+      border-color: #c1e9d4;
+      background: #dcf4e8;
+    }
+
+    .button-state-chip.unknown {
+      border-color: #efd7b0;
+      background: #f8eddb;
+    }
+
     @media (max-width: 1300px) {
       .layout { grid-template-columns: 1fr; }
       .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -633,6 +663,7 @@
             <input id="auditFilterSource" placeholder="source filter" style="width: 170px;" />
             <input id="auditFilterAction" placeholder="action filter" style="width: 170px;" />
             <button id="loadAuditBtn" class="ghost">Reload Audit</button>
+            <button id="clearAuditBtn" class="danger">Clear Audit</button>
           </div>
         </div>
         <div id="auditTable" class="table-wrap"></div>
@@ -675,8 +706,38 @@
     $("baseUrl").value = window.location.origin;
     $("releaseExpiresAt").value = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
+    const DASHBOARD_TZ_OFFSET_HOURS = 2;
+    const DASHBOARD_TZ_LABEL = `UTC${DASHBOARD_TZ_OFFSET_HOURS >= 0 ? "+" : ""}${DASHBOARD_TZ_OFFSET_HOURS}`;
+
+    function pad2(value) {
+      return String(value).padStart(2, "0");
+    }
+
+    function toOffsetDate(dateLike) {
+      const ms = dateLike instanceof Date ? dateLike.getTime() : new Date(dateLike).getTime();
+      if (Number.isNaN(ms)) {
+        return null;
+      }
+      return new Date(ms + DASHBOARD_TZ_OFFSET_HOURS * 60 * 60 * 1000);
+    }
+
+    function formatIsoWithOffset(value) {
+      if (!value || typeof value !== "string") {
+        return "-";
+      }
+      const shifted = toOffsetDate(value);
+      if (!shifted) {
+        return value;
+      }
+      return `${shifted.getUTCFullYear()}-${pad2(shifted.getUTCMonth() + 1)}-${pad2(shifted.getUTCDate())} ${pad2(shifted.getUTCHours())}:${pad2(shifted.getUTCMinutes())}:${pad2(shifted.getUTCSeconds())} ${DASHBOARD_TZ_LABEL}`;
+    }
+
     function nowTs() {
-      return new Date().toISOString().slice(11, 19);
+      const shifted = toOffsetDate(new Date());
+      if (!shifted) {
+        return new Date().toISOString().slice(11, 19);
+      }
+      return `${pad2(shifted.getUTCHours())}:${pad2(shifted.getUTCMinutes())}:${pad2(shifted.getUTCSeconds())}`;
     }
 
     function nowIso() {
@@ -748,6 +809,69 @@
         return true;
       }
       return false;
+    }
+
+    function ensureDeviceButtonStates(device) {
+      if (!device || typeof device !== "object") {
+        return {};
+      }
+      if (!device.button_states || typeof device.button_states !== "object" || Array.isArray(device.button_states)) {
+        device.button_states = {};
+      }
+      const states = device.button_states;
+      const buttonCount = Number.isInteger(device.button_count) ? device.button_count : 0;
+      for (let i = 0; i < buttonCount; i += 1) {
+        const key = String(i);
+        if (!states[key] || typeof states[key] !== "object") {
+          states[key] = {
+            state: "unknown",
+            ts: null,
+            source: null
+          };
+        }
+      }
+      return states;
+    }
+
+    function applyButtonStateFromEvent(device, inputIndex, eventName, ts, source = "device") {
+      if (!device || !Number.isInteger(inputIndex)) {
+        return;
+      }
+      const buttonCount = Number.isInteger(device.button_count) ? device.button_count : 0;
+      if (inputIndex < 0 || inputIndex >= buttonCount) {
+        return;
+      }
+
+      let nextState = "unknown";
+      if (eventName === "press") {
+        nextState = "pressed";
+      } else if (eventName === "release") {
+        nextState = "released";
+      }
+
+      const states = ensureDeviceButtonStates(device);
+      states[String(inputIndex)] = {
+        state: nextState,
+        ts: typeof ts === "string" ? ts : nowIso(),
+        source
+      };
+    }
+
+    function initializeDeviceButtonStates(device) {
+      ensureDeviceButtonStates(device);
+      const inputEvent = device && device.last_input_event && typeof device.last_input_event === "object"
+        ? device.last_input_event
+        : null;
+      if (!inputEvent) {
+        return;
+      }
+      const details = inputEvent.details && typeof inputEvent.details === "object" ? inputEvent.details : {};
+      const inputIndex = Number.isInteger(details.input_index) ? details.input_index : null;
+      const eventName = typeof details.event === "string" ? details.event : null;
+      if (inputIndex === null || !eventName) {
+        return;
+      }
+      applyButtonStateFromEvent(device, inputIndex, eventName, inputEvent.created_at, inputEvent.source || "device");
     }
 
     function applyRealtimePresence(message, online) {
@@ -823,6 +947,9 @@
           created_at: ts,
           details
         };
+        if (Number.isInteger(details.input_index) && typeof details.event === "string") {
+          applyButtonStateFromEvent(device, details.input_index, details.event, ts, "realtime");
+        }
       });
 
       const eventName = typeof details.event === "string" ? details.event : "event";
@@ -1514,7 +1641,7 @@
       $("kpis").innerHTML = cards.map(([label, value]) =>
         `<div class="kpi"><div class="label">${label}</div><div class="value">${value}</div></div>`
       ).join("");
-      $("generatedAt").textContent = `Generated ${overview.generated_at || ""}`;
+      $("generatedAt").textContent = `Generated ${formatIsoWithOffset(overview.generated_at)} (${DASHBOARD_TZ_LABEL})`;
       $("overviewMeta").textContent = `REST ${overview.api_versions?.rest || "v1"} | WS ${overview.api_versions?.ws || "v1"} | Deprecation window ${overview.api_versions?.deprecation_window_days || 0} days`;
       const policy = overview.backup?.policy || {};
       $("backupPolicy").textContent = `Backup dir: ${policy.output_dir || ""} | retention: ${policy.retention_count || 0} | encrypted: ${policy.encryption_configured ? "yes" : "no"} | RPO: ${policy.rpo_minutes || 0} min | RTO: ${policy.rto_minutes || 0} min`;
@@ -1763,12 +1890,12 @@
       }
       const actionName = typeof action.action === "string" ? action.action : "unknown";
       const source = typeof action.source === "string" ? action.source : "n/a";
-      const at = typeof action.created_at === "string" ? action.created_at : "";
+      const at = typeof action.created_at === "string" ? formatIsoWithOffset(action.created_at) : "-";
       const details = action.details && typeof action.details === "object" ? action.details : {};
       const relayPart = Number.isInteger(details.relay_index) ? ` r${details.relay_index}` : "";
       const commandPart = typeof details.action === "string" ? ` ${details.action}` : "";
       const suffix = [relayPart, commandPart].join("").trim();
-      return `${actionName}${suffix ? ` (${suffix})` : ""} [${source}] ${at}`.trim();
+      return `${actionName}${suffix ? ` (${suffix})` : ""} [${source}] ${at !== "-" ? at : ""}`.trim();
     }
 
     function summarizeLastInputEvent(device) {
@@ -1782,8 +1909,33 @@
       const idx = Number.isInteger(details.input_index) ? `B${details.input_index}` : "B?";
       const eventName = typeof details.event === "string" ? details.event : "event";
       const duration = Number.isFinite(Number(details.duration_ms)) ? `${Number(details.duration_ms)}ms` : "";
-      const at = typeof inputEvent.created_at === "string" ? inputEvent.created_at : "";
-      return `${idx} ${eventName}${duration ? ` (${duration})` : ""} ${at}`.trim();
+      const at = typeof inputEvent.created_at === "string" ? formatIsoWithOffset(inputEvent.created_at) : "-";
+      return `${idx} ${eventName}${duration ? ` (${duration})` : ""} ${at !== "-" ? at : ""}`.trim();
+    }
+
+    function renderButtonStates(device) {
+      const buttonCount = Number.isInteger(device?.button_count) ? device.button_count : 0;
+      if (buttonCount <= 0) {
+        return '<div class="muted">No buttons configured.</div>';
+      }
+
+      const states = ensureDeviceButtonStates(device);
+      const chips = [];
+      for (let i = 0; i < buttonCount; i += 1) {
+        const row = states[String(i)] && typeof states[String(i)] === "object" ? states[String(i)] : {};
+        const rawState = row.state === "pressed" || row.state === "released" ? row.state : "unknown";
+        const stateLabel = rawState === "pressed" ? "Pressed" : rawState === "released" ? "Released" : "Unknown";
+        const updatedAt = typeof row.ts === "string" ? formatIsoWithOffset(row.ts) : "-";
+        chips.push(`
+          <div class="button-state-chip ${rawState}">
+            <strong>B${escapeHtml(i)}</strong>
+            <span>${escapeHtml(stateLabel)}</span>
+            <div class="meta">${updatedAt !== "-" ? escapeHtml(updatedAt) : "No signal yet"}</div>
+          </div>
+        `);
+      }
+
+      return `<div class="button-state-grid">${chips.join("")}</div>`;
     }
 
     function renderDevices(devices) {
@@ -1799,6 +1951,7 @@
       }
 
       const cards = devices.map((d) => {
+        initializeDeviceButtonStates(d);
         const relayNames = Array.isArray(d.relay_names) ? d.relay_names : [];
         const relayRows = Array.isArray(d.relays) && d.relays.length > 0
           ? d.relays
@@ -1831,6 +1984,7 @@
         }).join("");
 
         const inputEditor = buildInputConfigEditor(d);
+        const buttonStates = renderButtonStates(d);
 
         const wsOnline = typeof d.ws_online === "boolean" ? d.ws_online : null;
         const online = wsOnline === null
@@ -1874,7 +2028,7 @@
               </div>
               <div class="device-meta-card">
                 <div class="device-meta-label">Connectivity</div>
-                <div class="device-meta-value">last_seen: ${escapeHtml(d.last_seen_at || "-")}</div>
+                <div class="device-meta-value">last_seen: ${escapeHtml(formatIsoWithOffset(d.last_seen_at))}</div>
                 <div class="meta">age: ${escapeHtml(ageLabel(d.last_seen_at))}</div>
                 <div class="meta">ip: ${escapeHtml(d.last_ip || "-")}</div>
               </div>
@@ -1899,6 +2053,7 @@
 
               <section class="device-block">
                 <div class="device-block-title">Button Mapping</div>
+                ${buttonStates}
                 ${inputEditor}
                 <div class="device-action-row">
                   <button data-save-io="${escapeHtml(d.id)}" class="secondary">Save I/O</button>
@@ -1939,7 +2094,7 @@
         <table>
           <thead><tr><th>Key ID</th><th>Status</th><th>Created</th><th>Rotated</th></tr></thead>
           <tbody>
-            ${keys.map((k) => `<tr><td class="code">${k.key_id}</td><td>${k.status}</td><td>${k.created_at || ""}</td><td>${k.rotated_at || "-"}</td></tr>`).join("")}
+            ${keys.map((k) => `<tr><td class="code">${k.key_id}</td><td>${k.status}</td><td>${escapeHtml(formatIsoWithOffset(k.created_at))}</td><td>${escapeHtml(formatIsoWithOffset(k.rotated_at))}</td></tr>`).join("")}
           </tbody>
         </table>
       `;
@@ -1957,7 +2112,7 @@
                 <td>${r.security_version}</td>
                 <td>${r.channel}</td>
                 <td><div class="code">active:${r.verification_key_id || "-"}<br/>next:${r.next_verification_key_id || "-"}</div></td>
-                <td>${r.expires_at}</td>
+                <td>${escapeHtml(formatIsoWithOffset(r.expires_at))}</td>
                 <td>
                   <button data-verify-release="${r.id}" class="secondary">Verify</button>
                 </td>
@@ -1977,8 +2132,8 @@
               <tr>
                 <td>${r.operation}</td>
                 <td>${r.status}</td>
-                <td>${r.started_at || ""}</td>
-                <td>${r.finished_at || ""}</td>
+                <td>${escapeHtml(formatIsoWithOffset(r.started_at))}</td>
+                <td>${escapeHtml(formatIsoWithOffset(r.finished_at))}</td>
                 <td class="code">${r.backup_path || "-"}</td>
                 <td>${r.error_message || "-"}</td>
               </tr>
@@ -1995,7 +2150,7 @@
           <tbody>
             ${rows.map((r) => `
               <tr>
-                <td>${r.created_at || ""}</td>
+                <td>${escapeHtml(formatIsoWithOffset(r.created_at))}</td>
                 <td>${r.source || "-"}</td>
                 <td>${r.action}</td>
                 <td>${r.device_uid || "-"}</td>
@@ -2420,6 +2575,32 @@
 
     $("loadAuditBtn").addEventListener("click", async () => {
       try { await loadAudit(); log("Audit list refreshed."); } catch (error) { log(`Audit load failed: ${error.message}`); }
+    });
+
+    $("clearAuditBtn").addEventListener("click", async () => {
+      const source = ($("auditFilterSource").value || "").trim();
+      const action = ($("auditFilterAction").value || "").trim();
+      const scope = source || action
+        ? `source='${source || "*"}', action='${action || "*"}'`
+        : "ALL audit entries";
+
+      if (!window.confirm(`Clear ${scope}? This cannot be undone.`)) {
+        return;
+      }
+
+      try {
+        const qs = new URLSearchParams();
+        if (source) qs.set("source", source);
+        if (action) qs.set("action", action);
+        const path = qs.toString()
+          ? `/api/v1/admin/audit?${qs.toString()}`
+          : "/api/v1/admin/audit";
+        const out = await api(path, { method: "DELETE" });
+        log(`Audit cleared. Deleted ${out.deleted || 0} row(s).`);
+        await Promise.all([loadAudit(), loadOverview()]);
+      } catch (error) {
+        log(`Clear audit failed: ${error.message}`);
+      }
     });
 
     loadCollapsedCards();
