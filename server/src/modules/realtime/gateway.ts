@@ -473,15 +473,18 @@ function handleDeviceSocket(
         ).catch(() => undefined);
       }
 
-      const owner = ownerUserId;
-      if (!owner) {
-        return;
-      }
-
-      realtimeHub.broadcastToUser(owner, {
-        ...message,
-        device_uid: deviceUid
-      });
+      void readOwnerUserId(deviceId)
+        .then((owner) => {
+          ownerUserId = owner;
+          if (!owner) {
+            return;
+          }
+          realtimeHub.broadcastToUser(owner, {
+            ...message,
+            device_uid: deviceUid
+          });
+        })
+        .catch(() => undefined);
     }
   });
 }

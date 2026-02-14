@@ -506,7 +506,13 @@
       preferences: null,
       refreshPromise: null,
       collapsedCards: {},
-      pendingDeviceActions: new Map()
+      pendingDeviceActions: new Map(),
+      realtimeSocket: null,
+      realtimeAuthed: false,
+      realtimeUrl: "",
+      realtimeReconnectTimer: null,
+      realtimeReconnectAttempt: 0,
+      realtimeReloadTimer: null
     };
 
     $("baseUrl").value = window.location.origin;
@@ -514,6 +520,10 @@
 
     function nowTs() {
       return new Date().toISOString().slice(11, 19);
+    }
+
+    function nowIso() {
+      return new Date().toISOString();
     }
 
     function log(line) {
@@ -524,6 +534,348 @@
 
     function baseUrl() {
       return ($("baseUrl").value || "").trim().replace(/\/+$/, "");
+    }
+
+    function realtimeUrl() {
+      const base = baseUrl();
+      if (!base) {
+        return "";
+      }
+
+      try {
+        const parsed = new URL(base);
+        const wsProtocol = parsed.protocol === "https:" ? "wss:" : "ws:";
+        return `${wsProtocol}//${parsed.host}/ws/client`;
+      } catch {
+        return "";
+      }
+    }
+
+    function clearRealtimeReconnectTimer() {
+      if (state.realtimeReconnectTimer) {
+        clearTimeout(state.realtimeReconnectTimer);
+        state.realtimeReconnectTimer = null;
+      }
+    }
+
+    function clearRealtimeReloadTimer() {
+      if (state.realtimeReloadTimer) {
+        clearTimeout(state.realtimeReloadTimer);
+        state.realtimeReloadTimer = null;
+      }
+    }
+
+    function queueRealtimeReload() {
+      if (state.realtimeReloadTimer) {
+        return;
+      }
+      state.realtimeReloadTimer = setTimeout(async () => {
+        state.realtimeReloadTimer = null;
+        try {
+          await Promise.all([loadDevices(), loadOverview()]);
+        } catch (error) {
+          log(`Realtime sync failed: ${error.message}`);
+        }
+      }, 800);
+    }
+
+    function withDeviceByUid(deviceUid, updater) {
+      if (!deviceUid) {
+        return false;
+      }
+      for (const device of state.devices) {
+        if (!device || device.device_uid !== deviceUid) {
+          continue;
+        }
+        updater(device);
+        return true;
+      }
+      return false;
+    }
+
+    function applyRealtimePresence(message, online) {
+      const uid = typeof message.device_uid === "string" ? message.device_uid : "";
+      const ts = typeof message.ts === "string" ? message.ts : nowIso();
+      const updated = withDeviceByUid(uid, (device) => {
+        device.ws_online = online;
+        if (online) {
+          device.last_seen_at = ts;
+        }
+      });
+      if (updated) {
+        renderDevices(state.devices);
+      } else {
+        queueRealtimeReload();
+      }
+    }
+
+    function applyRealtimeState(message) {
+      const uid = typeof message.device_uid === "string" ? message.device_uid : "";
+      const relays = Array.isArray(message.relays)
+        ? message.relays.map((value) => Boolean(value))
+        : null;
+      if (!uid || !relays) {
+        return;
+      }
+
+      const ts = typeof message.ts === "string" ? message.ts : nowIso();
+      const updated = withDeviceByUid(uid, (device) => {
+        const previousRelays = Array.isArray(device.relays) ? device.relays : [];
+        const nextRelays = [];
+        for (let i = 0; i < relays.length; i += 1) {
+          const existing = previousRelays.find((item) => Number(item.relay_index) === i) || {};
+          nextRelays.push({
+            relay_index: i,
+            relay_name: typeof existing.relay_name === "string" ? existing.relay_name : `Relay ${i + 1}`,
+            is_on: relays[i]
+          });
+        }
+        device.relays = nextRelays;
+        device.last_seen_at = ts;
+        device.ws_online = true;
+      });
+
+      if (updated) {
+        renderDevices(state.devices);
+      } else {
+        queueRealtimeReload();
+      }
+    }
+
+    function applyRealtimeInputEvent(message) {
+      const uid = typeof message.device_uid === "string" ? message.device_uid : "";
+      if (!uid) {
+        return;
+      }
+
+      const ts = typeof message.ts === "string" ? message.ts : nowIso();
+      const details = {
+        input_index: Number.isInteger(message.input_index) ? message.input_index : null,
+        input_type: typeof message.input_type === "string" ? message.input_type : null,
+        event: typeof message.event === "string" ? message.event : null,
+        duration_ms: Number.isFinite(Number(message.duration_ms)) ? Number(message.duration_ms) : null,
+        ts
+      };
+
+      const updated = withDeviceByUid(uid, (device) => {
+        device.last_seen_at = ts;
+        device.ws_online = true;
+        device.last_input_event = {
+          source: "device",
+          created_at: ts,
+          details
+        };
+      });
+
+      const eventName = typeof details.event === "string" ? details.event : "event";
+      const inputIndex = Number.isInteger(details.input_index) ? `B${details.input_index}` : "B?";
+      const durationText =
+        Number.isFinite(details.duration_ms) && details.duration_ms > 0 ? ` (${details.duration_ms}ms)` : "";
+      log(`Input event: ${uid} ${inputIndex} ${eventName}${durationText}`);
+
+      if (updated) {
+        renderDevices(state.devices);
+      } else {
+        queueRealtimeReload();
+      }
+    }
+
+    function sendRealtimeAuth() {
+      const socket = state.realtimeSocket;
+      if (!socket || socket.readyState !== WebSocket.OPEN || !state.accessToken) {
+        return;
+      }
+      socket.send(
+        JSON.stringify({
+          type: "auth",
+          access_token: state.accessToken
+        })
+      );
+    }
+
+    function scheduleRealtimeReconnect(reason) {
+      if (!state.user || !state.accessToken || state.realtimeReconnectTimer) {
+        return;
+      }
+      const attempt = Math.min(state.realtimeReconnectAttempt, 5);
+      const delayMs = Math.min(15000, 1000 * Math.pow(2, attempt));
+      state.realtimeReconnectAttempt += 1;
+      log(`Realtime disconnected (${reason}). Reconnecting in ${Math.round(delayMs / 1000)}s.`);
+      state.realtimeReconnectTimer = setTimeout(() => {
+        state.realtimeReconnectTimer = null;
+        connectRealtime();
+      }, delayMs);
+    }
+
+    function stopRealtime(options = {}) {
+      const { silent = false } = options;
+      clearRealtimeReconnectTimer();
+      clearRealtimeReloadTimer();
+      state.realtimeReconnectAttempt = 0;
+      state.realtimeAuthed = false;
+
+      const socket = state.realtimeSocket;
+      state.realtimeSocket = null;
+      state.realtimeUrl = "";
+
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+        socket.close(1000, "client_stop");
+      }
+
+      if (!silent) {
+        log("Realtime channel stopped.");
+      }
+    }
+
+    async function handleRealtimeMessage(socket, rawData) {
+      let text = "";
+      if (typeof rawData === "string") {
+        text = rawData;
+      } else if (rawData instanceof Blob) {
+        text = await rawData.text();
+      } else {
+        return;
+      }
+
+      const message = safeParseJson(text, null);
+      if (!message || typeof message !== "object") {
+        return;
+      }
+
+      const type = typeof message.type === "string" ? message.type : "";
+      if (!type) {
+        return;
+      }
+
+      if (socket !== state.realtimeSocket) {
+        return;
+      }
+
+      if (type === "auth_ok") {
+        state.realtimeAuthed = true;
+        state.realtimeReconnectAttempt = 0;
+        log("Realtime auth successful.");
+        return;
+      }
+
+      if (type === "auth_error") {
+        state.realtimeAuthed = false;
+        const code = typeof message.code === "string" ? message.code : "auth_error";
+        log(`Realtime auth failed: ${code}`);
+        if (code === "invalid_token" && state.refreshToken) {
+          try {
+            await refreshAccessToken();
+            sendRealtimeAuth();
+          } catch {
+            scheduleRealtimeReconnect("auth_failed");
+          }
+        }
+        return;
+      }
+
+      if (!state.realtimeAuthed) {
+        return;
+      }
+
+      if (type === "device_state") {
+        applyRealtimeState(message);
+        return;
+      }
+
+      if (type === "input_event") {
+        applyRealtimeInputEvent(message);
+        return;
+      }
+
+      if (type === "device_online") {
+        applyRealtimePresence(message, true);
+        const uid = typeof message.device_uid === "string" ? message.device_uid : "device";
+        log(`Device online: ${uid}`);
+        return;
+      }
+
+      if (type === "device_offline") {
+        applyRealtimePresence(message, false);
+        const uid = typeof message.device_uid === "string" ? message.device_uid : "device";
+        log(`Device offline: ${uid}`);
+        return;
+      }
+
+      if (type === "ota_status") {
+        const uid = typeof message.device_uid === "string" ? message.device_uid : "device";
+        const eventType = typeof message.event_type === "string" ? message.event_type : "status";
+        const status = typeof message.status === "string" ? message.status : "unknown";
+        log(`OTA status: ${uid} ${eventType} ${status}`);
+        return;
+      }
+
+      if (type === "cmd_ack" && message.ok === false) {
+        const code = typeof message.code === "string" ? message.code : "command_failed";
+        const detail = typeof message.message === "string" ? message.message : "";
+        log(`Realtime command failed: ${code}${detail ? ` (${detail})` : ""}`);
+      }
+    }
+
+    function connectRealtime(forceReconnect = false) {
+      if (!state.user || !state.accessToken) {
+        return;
+      }
+
+      const endpoint = realtimeUrl();
+      if (!endpoint) {
+        return;
+      }
+
+      const current = state.realtimeSocket;
+      if (current) {
+        const isSameUrl = state.realtimeUrl === endpoint;
+        if (
+          !forceReconnect &&
+          isSameUrl &&
+          (current.readyState === WebSocket.OPEN || current.readyState === WebSocket.CONNECTING)
+        ) {
+          return;
+        }
+        stopRealtime({ silent: true });
+      }
+
+      clearRealtimeReconnectTimer();
+      state.realtimeUrl = endpoint;
+
+      const socket = new WebSocket(endpoint);
+      state.realtimeSocket = socket;
+      state.realtimeAuthed = false;
+
+      socket.addEventListener("open", () => {
+        if (socket !== state.realtimeSocket) {
+          return;
+        }
+        state.realtimeReconnectAttempt = 0;
+        log("Realtime channel connected.");
+        sendRealtimeAuth();
+      });
+
+      socket.addEventListener("message", (event) => {
+        void handleRealtimeMessage(socket, event.data);
+      });
+
+      socket.addEventListener("close", (event) => {
+        if (socket !== state.realtimeSocket) {
+          return;
+        }
+        state.realtimeSocket = null;
+        state.realtimeAuthed = false;
+        if (state.user && state.accessToken) {
+          scheduleRealtimeReconnect(`code ${event.code}`);
+        }
+      });
+
+      socket.addEventListener("error", () => {
+        if (socket !== state.realtimeSocket) {
+          return;
+        }
+        log("Realtime channel error.");
+      });
     }
 
     function safeParseJson(text, fallback) {
@@ -935,6 +1287,13 @@
         setAuthState();
         persistSession();
         log("Access token refreshed.");
+        if (state.user) {
+          if (state.realtimeSocket && state.realtimeSocket.readyState === WebSocket.OPEN) {
+            sendRealtimeAuth();
+          } else {
+            connectRealtime();
+          }
+        }
       })();
 
       try {
@@ -1109,7 +1468,10 @@
           .map((row) => `<div>${escapeHtml(describeInputConfigRow(row))}</div>`)
           .join("");
 
-        const online = Boolean(d.is_active) && isLikelyOnline(d.last_seen_at);
+        const wsOnline = typeof d.ws_online === "boolean" ? d.ws_online : null;
+        const online = wsOnline === null
+          ? Boolean(d.is_active) && isLikelyOnline(d.last_seen_at)
+          : wsOnline;
         const statusBadge = !d.is_active
           ? '<span class="pill bad">inactive</span>'
           : online
@@ -1339,12 +1701,14 @@
       setAuthState();
       persistSession();
       log(`${endpoint} successful for ${state.user.email}.`);
+      connectRealtime(true);
       await loadPreferences();
       await loadAll();
     }
 
     async function refreshToken() {
       await refreshAccessToken();
+      connectRealtime();
     }
 
     async function logout() {
@@ -1358,6 +1722,7 @@
           // Continue local logout even if revoke fails.
         }
       }
+      stopRealtime({ silent: true });
       clearSession();
       setAuthState();
       log("Logged out.");
@@ -1392,6 +1757,10 @@
 
     $("claimDeviceBtn").addEventListener("click", async () => {
       try { await claimDeviceByCode($("claimCodeInput").value || ""); } catch (error) { log(`Claim failed: ${error.message}`); }
+    });
+    $("baseUrl").addEventListener("change", () => {
+      persistSession();
+      connectRealtime(true);
     });
 
     $("loadMetricsBtn").addEventListener("click", async () => {
@@ -1627,6 +1996,7 @@
 
     if (state.user && state.refreshToken) {
       log(`Restored session for ${state.user.email}.`);
+      connectRealtime();
       (async () => {
         try {
           await loadPreferences();
