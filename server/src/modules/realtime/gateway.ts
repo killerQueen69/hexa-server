@@ -263,6 +263,7 @@ async function listOwnedDeviceUids(userId: string): Promise<string[]> {
 
 async function sendWifiConfigCommand(params: {
   userId: string;
+  role: string;
   deviceId: string;
   command: ClientWifiCommand;
   timeoutMs: number;
@@ -275,22 +276,38 @@ async function sendWifiConfigCommand(params: {
       details?: Record<string, unknown>;
     }
 > {
-  const owned = await query<{ device_uid: string }>(
-    `SELECT device_uid
-     FROM devices
-     WHERE id = $1
-       AND owner_user_id = $2
-       AND is_active = TRUE
-     LIMIT 1`,
-    [params.deviceId, params.userId]
-  );
-  const row = owned.rows[0];
+  const isAdminActor = params.role === "admin";
+  const lookup = isAdminActor
+    ? await query<{ device_uid: string }>(
+        `SELECT device_uid
+         FROM devices
+         WHERE id = $1
+           AND is_active = TRUE
+         LIMIT 1`,
+        [params.deviceId]
+      )
+    : await query<{ device_uid: string }>(
+        `SELECT device_uid
+         FROM devices
+         WHERE id = $1
+           AND owner_user_id = $2
+           AND is_active = TRUE
+         LIMIT 1`,
+        [params.deviceId, params.userId]
+      );
+  const row = lookup.rows[0];
   if (!row) {
-    return {
-      ok: false,
-      code: "forbidden",
-      message: "Only the device owner can control this device."
-    };
+    return isAdminActor
+      ? {
+          ok: false,
+          code: "not_found",
+          message: "Device not found or inactive."
+        }
+      : {
+          ok: false,
+          code: "forbidden",
+          message: "Only the device owner can control this device."
+        };
   }
 
   const commandId = newId();
@@ -773,6 +790,7 @@ function handleClientSocket(
 ): void {
   let clientSessionId: string | null = null;
   let authedUserId: string | null = null;
+  let authedUserRole: string | null = null;
 
   socket.on("close", () => {
     if (clientSessionId) {
@@ -808,6 +826,7 @@ function handleClientSocket(
           }>(accessToken);
 
           authedUserId = payload.sub;
+          authedUserRole = payload.role;
           const clientSession = realtimeHub.registerClient({
             userId: payload.sub,
             role: payload.role,
@@ -1032,9 +1051,12 @@ function handleClientSocket(
     }
 
     const actorUserId = authedUserId;
+    const actorRole = authedUserRole ?? "user";
     const accepted = enqueueDeviceCommand(deviceId, async () => {
       try {
-        const permitted = await isDeviceOwner(actorUserId, deviceId);
+        const permitted = actorRole === "admin"
+          ? true
+          : await isDeviceOwner(actorUserId, deviceId);
         if (!permitted) {
           sendJson(socket, {
             type: "cmd_ack",
@@ -1048,6 +1070,7 @@ function handleClientSocket(
         if (command.scope === "wifi") {
           const wifiCommandResult = await sendWifiConfigCommand({
             userId: actorUserId,
+            role: actorRole,
             deviceId,
             command,
             timeoutMs: timeoutMs ?? WIFI_CONFIG_COMMAND_TIMEOUT_MS

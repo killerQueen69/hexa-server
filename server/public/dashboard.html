@@ -1364,6 +1364,9 @@
       if (!device || typeof device !== "object") {
         return false;
       }
+      if (isAdminUser()) {
+        return true;
+      }
       if (device.is_owner === true) {
         return true;
       }
@@ -2571,7 +2574,7 @@
                   <div class="meta">
                     ${isOwner
                       ? "Wi-Fi commands use realtime channel and require the device to be online."
-                      : "Only the current owner can send Wi-Fi set/clear commands."}
+                      : "Only owner/admin can send Wi-Fi set/clear commands."}
                   </div>
                 </section>
               </div>
@@ -3105,7 +3108,7 @@
             throw new Error("Device not found in dashboard state.");
           }
           if (!currentUserOwnsDevice(device)) {
-            throw new Error("forbidden: Only the current device owner can send Wi-Fi commands.");
+            throw new Error("forbidden: Only owner/admin can send Wi-Fi commands.");
           }
 
           const card = target.closest(".device-card");
