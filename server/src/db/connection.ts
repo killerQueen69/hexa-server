@@ -5,7 +5,10 @@ const ssl = env.DB_SSL ? { rejectUnauthorized: env.DB_SSL_REJECT_UNAUTHORIZED } 
 
 export const pool = new Pool({
   connectionString: env.DATABASE_URL,
-  ssl
+  ssl,
+  max: env.DB_POOL_MAX,
+  idleTimeoutMillis: env.DB_POOL_IDLE_TIMEOUT_MS,
+  connectionTimeoutMillis: env.DB_POOL_CONNECTION_TIMEOUT_MS
 });
 
 export async function query<T extends QueryResultRow = QueryResultRow>(

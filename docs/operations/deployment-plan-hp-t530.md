@@ -176,6 +176,10 @@ Route `admin.vistfiy.store` through `cloudflared` to local server and protect wi
 ## 12. Capacity Notes for 4 GB / 16 GB
 
 - Keep PostgreSQL shared buffers conservative (`256MB` range).
+- Set explicit Node `pg` pool limits in `server/.env`:
+  - `DB_POOL_MAX=30`
+  - `DB_POOL_IDLE_TIMEOUT_MS=30000`
+  - `DB_POOL_CONNECTION_TIMEOUT_MS=5000`
 - Keep Node single process initially.
 - Keep log retention short and rotate aggressively.
 - Keep backup retention small (`7` default is appropriate for 16 GB).

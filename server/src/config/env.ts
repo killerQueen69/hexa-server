@@ -24,6 +24,9 @@ const envSchema = z.object({
     .optional()
     .default("true")
     .transform((value) => value !== "false"),
+  DB_POOL_MAX: z.coerce.number().int().min(1).max(200).default(30),
+  DB_POOL_IDLE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).default(30000),
+  DB_POOL_CONNECTION_TIMEOUT_MS: z.coerce.number().int().min(250).max(120000).default(5000),
   ALEXA_ENABLED: z
     .string()
     .optional()

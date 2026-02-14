@@ -15,6 +15,7 @@
     "seed:dev": "tsx scripts/seed-dev.ts",
     "backup:run": "tsx scripts/ops-backup.ts",
     "restore:drill": "tsx scripts/ops-restore-drill.ts",
+    "load:realtime": "tsx scripts/load-realtime.ts",
     "ops:update": "bash scripts/ops-update-server.sh",
     "validate:signoff": "tsx scripts/validate-staging-signoff.ts",
     "test:unit": "cross-env NODE_ENV=test DB_SSL=false DB_SSL_REJECT_UNAUTHORIZED=false ENFORCE_HTTPS=false TRUST_PROXY=false tsx --test tests/unit/server.unit.test.ts",

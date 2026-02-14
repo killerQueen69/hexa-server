@@ -21,6 +21,7 @@ Notes:
 
 - Keep `api.vistfiy.store` DNS-only so ESP8266 talks directly to your Caddy cert chain.
 - Keep `admin.vistfiy.store` proxied so Cloudflare Access policies can protect admin traffic.
+- Use `admin.vistfiy.store` only for admin dashboard/operator access, not for firmware or device API/WS traffic.
 
 ## 2. Caddy (Device/API Plane)
 
