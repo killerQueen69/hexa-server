@@ -713,6 +713,15 @@
       realtimeReconnectAttempt: 0,
       realtimeReloadTimer: null
     };
+    const ADMIN_ONLY_CARD_IDS = new Set([
+      "overview",
+      "users",
+      "ota-keys",
+      "ota-releases",
+      "backup-runs",
+      "audit-log",
+      "raw-metrics"
+    ]);
 
     $("baseUrl").value = window.location.origin;
     $("releaseExpiresAt").value = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
@@ -801,7 +810,11 @@
       state.realtimeReloadTimer = setTimeout(async () => {
         state.realtimeReloadTimer = null;
         try {
-          await Promise.all([loadDevices(), loadOverview()]);
+          if (isAdminUser()) {
+            await Promise.all([loadDevices(), loadOverview()]);
+          } else {
+            await loadDevices();
+          }
         } catch (error) {
           log(`Realtime sync failed: ${error.message}`);
         }
@@ -1418,6 +1431,7 @@
         badge.textContent = "Not Authenticated";
         badge.className = "pill";
         $("tokenView").textContent = "";
+        applyRoleVisibility();
         return;
       }
       badge.textContent = `${state.user.email} (${state.user.role})`;
@@ -1426,6 +1440,22 @@
       $("tokenView").textContent = tokenTail
         ? `access_token: ...${tokenTail} | refresh loaded: ${state.refreshToken ? "yes" : "no"}`
         : "refresh loaded: yes";
+      applyRoleVisibility();
+    }
+
+    function isAdminUser() {
+      return Boolean(state.user && state.user.role === "admin");
+    }
+
+    function applyRoleVisibility() {
+      const admin = isAdminUser();
+      document.querySelectorAll(".card[data-card-id]").forEach((card) => {
+        const cardId = card.getAttribute("data-card-id");
+        if (!cardId || !ADMIN_ONLY_CARD_IDS.has(cardId)) {
+          return;
+        }
+        card.style.display = admin ? "" : "none";
+      });
     }
 
     function buildDeviceViewState() {
@@ -1989,6 +2019,7 @@
       }
 
       const cards = devices.map((d) => {
+        const admin = isAdminUser();
         initializeDeviceButtonStates(d);
         const relayNames = Array.isArray(d.relay_names) ? d.relay_names : [];
         const relayRows = Array.isArray(d.relays) && d.relays.length > 0
@@ -2092,10 +2123,11 @@
               <section class="device-block">
                 <div class="device-block-title">Button Mapping</div>
                 ${buttonStates}
-                ${inputEditor}
+                ${admin ? inputEditor : '<div class="muted">Button mapping edit is admin only.</div>'}
+                ${admin ? `
                 <div class="device-action-row">
                   <button data-save-io="${escapeHtml(d.id)}" class="secondary">Save I/O</button>
-                </div>
+                </div>` : ""}
               </section>
             </div>
 
@@ -2202,18 +2234,27 @@
     }
 
     async function loadOverview() {
+      if (!isAdminUser()) {
+        return;
+      }
       const overview = await api("/api/v1/admin/overview", { method: "GET" });
       renderKpis(overview);
     }
 
     async function loadUsers() {
+      if (!isAdminUser()) {
+        state.users = [];
+        renderUsers([]);
+        return;
+      }
       const users = await api("/api/v1/admin/users", { method: "GET" });
       state.users = users;
       renderUsers(users);
     }
 
     async function loadDevices() {
-      const devices = await api("/api/v1/admin/devices", { method: "GET" });
+      const path = isAdminUser() ? "/api/v1/admin/devices" : "/api/v1/devices";
+      const devices = await api(path, { method: "GET" });
 
       const previousStatesByUid = new Map();
       for (const device of state.devices || []) {
@@ -2242,6 +2283,9 @@
     }
 
     async function loadOta() {
+      if (!isAdminUser()) {
+        return;
+      }
       const [keys, releases] = await Promise.all([
         api("/api/v1/ota/signing-keys", { method: "GET" }),
         api("/api/v1/ota/releases", { method: "GET" })
@@ -2251,11 +2295,17 @@
     }
 
     async function loadOpsRuns() {
+      if (!isAdminUser()) {
+        return;
+      }
       const runs = await api("/api/v1/admin/ops/backup/runs?limit=50", { method: "GET" });
       renderBackupRuns(runs);
     }
 
     async function loadAudit() {
+      if (!isAdminUser()) {
+        return;
+      }
       const source = encodeURIComponent($("auditFilterSource").value || "");
       const action = encodeURIComponent($("auditFilterAction").value || "");
       const rows = await api(`/api/v1/admin/audit?limit=100&source=${source}&action=${action}`, { method: "GET" });
@@ -2268,15 +2318,22 @@
     }
 
     async function loadAll() {
-      await Promise.all([
-        loadOverview(),
-        loadUsers(),
-        loadDevices(),
-        loadOta(),
-        loadOpsRuns(),
-        loadAudit(),
-        loadMetrics()
-      ]);
+      if (isAdminUser()) {
+        await Promise.all([
+          loadOverview(),
+          loadUsers(),
+          loadDevices(),
+          loadOta(),
+          loadOpsRuns(),
+          loadAudit(),
+          loadMetrics()
+        ]);
+      } else {
+        await Promise.all([
+          loadDevices(),
+          loadMetrics()
+        ]);
+      }
       log("Dashboard data refreshed.");
     }
 
@@ -2290,7 +2347,11 @@
       });
       $("claimCodeInput").value = "";
       log(`Claimed device: ${out.device?.device_uid || "ok"}`);
-      await Promise.all([loadDevices(), loadOverview(), loadUsers()]);
+      if (isAdminUser()) {
+        await Promise.all([loadDevices(), loadOverview(), loadUsers()]);
+      } else {
+        await loadDevices();
+      }
     }
 
     async function login(endpoint) {
@@ -2594,8 +2655,11 @@
       try {
         if (relayCmd) {
           const [deviceId, idx, action] = relayCmd.split(":");
+          const relayPath = isAdminUser()
+            ? `/api/v1/admin/devices/${encodeURIComponent(deviceId)}/relays/${encodeURIComponent(idx)}`
+            : `/api/v1/devices/${encodeURIComponent(deviceId)}/relays/${encodeURIComponent(idx)}`;
           await withDeviceActionLock(deviceId, async () => {
-            await api(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}/relays/${encodeURIComponent(idx)}`, {
+            await api(relayPath, {
               method: "POST",
               body: JSON.stringify({ action })
             });
@@ -2607,8 +2671,11 @@
 
         if (relayAll) {
           const [deviceId, action] = relayAll.split(":");
+          const relayAllPath = isAdminUser()
+            ? `/api/v1/admin/devices/${encodeURIComponent(deviceId)}/relays/all`
+            : `/api/v1/devices/${encodeURIComponent(deviceId)}/relays/all`;
           await withDeviceActionLock(deviceId, async () => {
-            await api(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}/relays/all`, {
+            await api(relayAllPath, {
               method: "POST",
               body: JSON.stringify({ action })
             });
@@ -2619,6 +2686,9 @@
         }
 
         if (saveIo) {
+          if (!isAdminUser()) {
+            throw new Error("forbidden: Insufficient role.");
+          }
           const device = state.devices.find((item) => item && item.id === saveIo);
           if (!device) {
             throw new Error("Device not found in dashboard state.");
@@ -2635,7 +2705,10 @@
         }
 
         if (rotateToken) {
-          const out = await api(`/api/v1/admin/devices/${encodeURIComponent(rotateToken)}/token/rotate`, {
+          const rotatePath = isAdminUser()
+            ? `/api/v1/admin/devices/${encodeURIComponent(rotateToken)}/token/rotate`
+            : `/api/v1/devices/${encodeURIComponent(rotateToken)}/token/rotate`;
+          const out = await api(rotatePath, {
             method: "POST",
             body: "{}"
           });
@@ -2644,7 +2717,10 @@
         }
 
         if (releaseDevice) {
-          const out = await api(`/api/v1/admin/devices/${encodeURIComponent(releaseDevice)}/release`, {
+          const releasePath = isAdminUser()
+            ? `/api/v1/admin/devices/${encodeURIComponent(releaseDevice)}/release`
+            : `/api/v1/devices/${encodeURIComponent(releaseDevice)}/release`;
+          const out = await api(releasePath, {
             method: "POST",
             body: "{}"
           });

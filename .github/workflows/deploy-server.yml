@@ -16,15 +16,26 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: >
-      github.event_name == 'workflow_dispatch' &&
-      secrets.PROD_SSH_HOST != '' &&
-      secrets.PROD_SSH_USER != '' &&
-      secrets.PROD_SSH_KEY != ''
+    if: github.event_name == 'workflow_dispatch'
     environment: production
     steps:
+      - name: Check SSH secret configuration
+        id: ssh_ready
+        shell: bash
+        env:
+          PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          if [[ -n "$PROD_SSH_HOST" && -n "$PROD_SSH_USER" && -n "$PROD_SSH_KEY" ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "SSH deploy skipped: PROD_SSH_HOST/USER/KEY secrets are not configured."
+          fi
+
       - name: Deploy to Debian server (full update)
-        if: github.event_name != 'workflow_dispatch' || inputs.fast != true
+        if: steps.ssh_ready.outputs.ready == 'true' && (github.event_name != 'workflow_dispatch' || inputs.fast != true)
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.PROD_SSH_HOST }}
@@ -37,7 +48,7 @@ jobs:
             sudo /opt/hexa/resltime/server/scripts/ops-update-server.sh --branch main
 
       - name: Deploy to Debian server (fast update)
-        if: github.event_name == 'workflow_dispatch' && inputs.fast == true
+        if: steps.ssh_ready.outputs.ready == 'true' && github.event_name == 'workflow_dispatch' && inputs.fast == true
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.PROD_SSH_HOST }}
