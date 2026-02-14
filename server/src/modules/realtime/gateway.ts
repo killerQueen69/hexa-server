@@ -45,6 +45,8 @@ const wsPackage = require("ws") as {
 
 const DEVICE_WS_HEARTBEAT_INTERVAL_MS = 20_000;
 const DEVICE_WS_HEARTBEAT_MISS_LIMIT = 2;
+const DEVICE_OFFLINE_GRACE_MS = 5_000;
+const pendingOfflineTimers = new Map<string, NodeJS.Timeout>();
 
 function broadcastDeviceEvent(ownerUserId: string | null, payload: unknown): void {
   realtimeHub.broadcastToAudience(
@@ -112,6 +114,51 @@ async function readOwnerUserId(deviceId: string): Promise<string | null> {
     [deviceId]
   );
   return result.rows[0]?.owner_user_id ?? null;
+}
+
+function cancelPendingOffline(deviceUid: string): void {
+  const timer = pendingOfflineTimers.get(deviceUid);
+  if (!timer) {
+    return;
+  }
+
+  clearTimeout(timer);
+  pendingOfflineTimers.delete(deviceUid);
+}
+
+function scheduleOfflineBroadcast(deviceUid: string, deviceId: string): void {
+  cancelPendingOffline(deviceUid);
+
+  const timer = setTimeout(() => {
+    pendingOfflineTimers.delete(deviceUid);
+
+    if (realtimeHub.getDevice(deviceUid)) {
+      return;
+    }
+
+    void readOwnerUserId(deviceId)
+      .then((owner) => {
+        const ts = nowIso();
+        void automationService
+          .handleDeviceEvent({
+            type: "device_offline",
+            device_uid: deviceUid,
+            ts
+          })
+          .catch(() => undefined);
+
+        void smartHomeService.setDeviceAvailability(deviceUid, false);
+
+        broadcastDeviceEvent(owner, {
+          type: "device_offline",
+          device_uid: deviceUid,
+          ts
+        });
+      })
+      .catch(() => undefined);
+  }, DEVICE_OFFLINE_GRACE_MS);
+
+  pendingOfflineTimers.set(deviceUid, timer);
 }
 
 async function listOwnedDeviceUids(userId: string): Promise<string[]> {
@@ -216,6 +263,7 @@ function handleDeviceSocket(
   let authenticated = false;
   let alive = true;
   let missedPongs = 0;
+  let shutdownHandled = false;
 
   socket.on("pong", () => {
     alive = true;
@@ -223,35 +271,22 @@ function handleDeviceSocket(
   });
 
   const shutdown = () => {
+    if (shutdownHandled) {
+      return;
+    }
+    shutdownHandled = true;
+
     if (heartbeat) {
       clearInterval(heartbeat);
-    }
-
-    if (deviceId && deviceUid) {
-      void readOwnerUserId(deviceId)
-        .then((owner) => {
-          const ts = nowIso();
-          void automationService
-            .handleDeviceEvent({
-              type: "device_offline",
-              device_uid: deviceUid as string,
-              ts
-            })
-            .catch(() => undefined);
-
-          void smartHomeService.setDeviceAvailability(deviceUid as string, false);
-
-          broadcastDeviceEvent(owner, {
-            type: "device_offline",
-            device_uid: deviceUid,
-            ts
-          });
-        })
-        .catch(() => undefined);
+      heartbeat = undefined;
     }
 
     if (deviceUid) {
       realtimeHub.unregisterDevice(deviceUid, deviceSessionId ?? undefined);
+    }
+
+    if (deviceId && deviceUid && !realtimeHub.getDevice(deviceUid)) {
+      scheduleOfflineBroadcast(deviceUid, deviceId);
     }
   };
 
@@ -278,6 +313,7 @@ function handleDeviceSocket(
     deviceId = row.id;
     ownerUserId = row.owner_user_id;
     authenticated = true;
+    cancelPendingOffline(row.device_uid);
 
     const session = realtimeHub.registerDevice({
       deviceId: row.id,
@@ -547,7 +583,10 @@ function handleClientSocket(
           });
 
           const ownedUids = await listOwnedDeviceUids(payload.sub);
-          const onlineSet = new Set(realtimeHub.listOnlineDeviceUids());
+          const onlineSet = new Set([
+            ...realtimeHub.listOnlineDeviceUids(),
+            ...pendingOfflineTimers.keys()
+          ]);
           for (const uid of ownedUids) {
             if (!onlineSet.has(uid)) {
               continue;

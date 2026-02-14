@@ -3,7 +3,7 @@ import { z } from "zod";
 import { env } from "../../config/env";
 import { query, withTransaction } from "../../db/connection";
 import { sendApiError } from "../../http/api-error";
-import { newId, randomClaimCode, randomToken, sha256 } from "../../utils/crypto";
+import { newId, randomToken, sha256 } from "../../utils/crypto";
 
 type DeviceProvisionRow = {
   id: string;
@@ -16,6 +16,7 @@ const provisionRegisterSchema = z.object({
   provision_key: z.string().min(16),
   chip_id: z.string().min(3).max(64).regex(/^[a-zA-Z0-9._:-]+$/),
   mac: z.string().min(2).max(64).optional(),
+  claim_code: z.string().length(8).regex(/^[a-fA-F0-9]{8}$/).optional(),
   model: z.string().min(1).max(100).default("hexa-mini-switch-v1"),
   device_class: z.enum(["relay_controller", "ir_hub", "sensor_hub", "hybrid"]).default("relay_controller"),
   capabilities: z.array(
@@ -77,6 +78,24 @@ function normalizeCapabilities(
   return defaultCapabilities(deviceClass, relayCount);
 }
 
+function extractHex(input: string): string {
+  return input.replace(/[^a-fA-F0-9]/g, "").toUpperCase();
+}
+
+function deriveClaimCode(mac: string | undefined, hardwareUid: string): string {
+  const macHex = extractHex(mac ?? "");
+  if (macHex.length >= 8) {
+    return macHex.slice(-8);
+  }
+
+  const hwHex = extractHex(hardwareUid);
+  if (hwHex.length >= 8) {
+    return hwHex.slice(-8);
+  }
+
+  return hwHex.padStart(8, "0").slice(-8);
+}
+
 async function allocateDeviceUid(
   client: {
     query: <T = unknown>(sql: string, params?: unknown[]) => Promise<{ rows: T[]; rowCount: number | null }>;
@@ -118,6 +137,8 @@ export async function provisionRoutes(server: FastifyInstance): Promise<void> {
       payload.relay_count,
       payload.capabilities
     );
+    const derivedClaimCode = deriveClaimCode(payload.mac, hardwareUid);
+    const provisionClaimCode = payload.claim_code?.trim().toUpperCase() ?? derivedClaimCode;
     const rawToken = randomToken(32);
     const tokenHash = sha256(rawToken);
     const now = new Date();
@@ -134,7 +155,7 @@ export async function provisionRoutes(server: FastifyInstance): Promise<void> {
       const row = existing.rows[0];
 
       if (row) {
-        const claimCode = row.owner_user_id ? null : row.claim_code ?? randomClaimCode(8);
+        const claimCode = row.owner_user_id ? null : provisionClaimCode;
         await client.query(
           `UPDATE devices
            SET device_token_hash = $1,
@@ -184,7 +205,7 @@ export async function provisionRoutes(server: FastifyInstance): Promise<void> {
 
       const deviceId = newId();
       const deviceUid = await allocateDeviceUid(client, hardwareUid);
-      const claimCode = randomClaimCode(8);
+      const claimCode = provisionClaimCode;
       const relayNames = buildRelayNames(payload.relay_count);
 
       await client.query(

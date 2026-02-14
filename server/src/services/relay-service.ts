@@ -143,6 +143,13 @@ function mapAckError(error: unknown): AckFailure {
   };
 }
 
+function normalizeDeviceRejectCode(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    return "device_rejected_command";
+  }
+  return raw;
+}
+
 function toEpochMs(value: Date | string | null | undefined): number {
   if (!value) {
     return 0;
@@ -471,7 +478,8 @@ class RelayService {
     }
 
     if (!ack.ok) {
-      throw new RelayServiceError(409, "device_rejected_command", ack.error ?? "Device rejected command.");
+      const rejectCode = normalizeDeviceRejectCode(ack.error);
+      throw new RelayServiceError(409, rejectCode, ack.error ?? "Device rejected command.");
     }
 
     const changedAt = nowIso();
@@ -616,7 +624,8 @@ class RelayService {
     }
 
     if (!ack.ok) {
-      throw new RelayServiceError(409, "device_rejected_command", ack.error ?? "Device rejected command.");
+      const rejectCode = normalizeDeviceRejectCode(ack.error);
+      throw new RelayServiceError(409, rejectCode, ack.error ?? "Device rejected command.");
     }
 
     const isOn = params.action === "on";
