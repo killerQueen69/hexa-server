@@ -246,6 +246,30 @@ Wi-Fi credential removal command (`clear`):
 }
 ```
 
+Device reboot command:
+
+```json
+{
+  "type": "cmd",
+  "request_id": "req-005",
+  "device_id": "device-uuid",
+  "scope": "device",
+  "operation": "reboot"
+}
+```
+
+Device factory reset command:
+
+```json
+{
+  "type": "cmd",
+  "request_id": "req-006",
+  "device_id": "device-uuid",
+  "scope": "device",
+  "operation": "factory_reset"
+}
+```
+
 Server returns `cmd_ack` with either:
 
 - `ok: true` and command result

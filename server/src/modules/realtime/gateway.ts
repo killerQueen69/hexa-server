@@ -30,7 +30,12 @@ type ClientWifiCommand =
       reboot: boolean;
     };
 
-type ClientCommand = ClientRelayCommand | ClientWifiCommand;
+type ClientDeviceControlCommand = {
+  scope: "device";
+  operation: "reboot" | "factory_reset";
+};
+
+type ClientCommand = ClientRelayCommand | ClientWifiCommand | ClientDeviceControlCommand;
 
 type RawWebSocket = {
   readyState: number;
@@ -64,6 +69,7 @@ const DEVICE_WS_HEARTBEAT_MISS_LIMIT = 1;
 const DEVICE_OFFLINE_GRACE_MS = 5_000;
 const DEVICE_COMMAND_QUEUE_MAX = 40;
 const WIFI_CONFIG_COMMAND_TIMEOUT_MS = 12_000;
+const DEVICE_CONTROL_COMMAND_TIMEOUT_MS = 8_000;
 const WIFI_SSID_MAX_LEN = 32;
 const WIFI_PASSWORD_MAX_LEN = 63;
 const pendingOfflineTimers = new Map<string, NodeJS.Timeout>();
@@ -365,6 +371,137 @@ async function sendWifiConfigCommand(params: {
         message: "Device rejected Wi-Fi update.",
         details: {
           command_id: commandId
+        }
+      };
+    }
+    return {
+      ok: true,
+      deviceUid: row.device_uid,
+      latencyMs: ack.latencyMs
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message === "ack_timeout") {
+      return {
+        ok: false,
+        code: "device_unreachable",
+        message: "Timed out waiting for device acknowledgement.",
+        details: {
+          command_id: commandId,
+          timeout_ms: params.timeoutMs
+        }
+      };
+    }
+    if (error instanceof Error && error.message === "device_disconnected") {
+      return {
+        ok: false,
+        code: "device_offline",
+        message: "Device disconnected before acknowledgement.",
+        details: {
+          command_id: commandId
+        }
+      };
+    }
+    return {
+      ok: false,
+      code: "device_ack_failed",
+      message: "Device acknowledgement failed.",
+      details: {
+        command_id: commandId
+      }
+    };
+  }
+}
+
+async function sendDeviceControlCommand(params: {
+  userId: string;
+  role: string;
+  deviceId: string;
+  operation: "reboot" | "factory_reset";
+  timeoutMs: number;
+}): Promise<
+  | { ok: true; deviceUid: string; latencyMs: number }
+  | {
+      ok: false;
+      code: string;
+      message: string;
+      details?: Record<string, unknown>;
+    }
+> {
+  const isAdminActor = params.role === "admin";
+  const lookup = isAdminActor
+    ? await query<{ device_uid: string; is_active: boolean }>(
+        `SELECT device_uid, is_active
+         FROM devices
+         WHERE id = $1
+         LIMIT 1`,
+        [params.deviceId]
+      )
+    : await query<{ device_uid: string; is_active: boolean }>(
+        `SELECT device_uid, is_active
+         FROM devices
+         WHERE id = $1
+           AND owner_user_id = $2
+         LIMIT 1`,
+        [params.deviceId, params.userId]
+      );
+  const row = lookup.rows[0];
+  if (!row) {
+    return isAdminActor
+      ? {
+          ok: false,
+          code: "not_found",
+          message: "Device not found."
+        }
+      : {
+          ok: false,
+          code: "forbidden",
+          message: "Only the device owner can control this device."
+        };
+  }
+  if (!row.is_active) {
+    return {
+      ok: false,
+      code: "device_inactive",
+      message: "Device is inactive."
+    };
+  }
+
+  const commandId = newId();
+  const pendingAck = realtimeHub.createPendingAck(commandId, row.device_uid, params.timeoutMs);
+  const payload = {
+    type: "device_control",
+    command_id: commandId,
+    operation: params.operation,
+    ts: nowIso()
+  };
+
+  const sent = realtimeHub.sendToDevice(row.device_uid, payload);
+  if (!sent) {
+    realtimeHub.resolveAck(commandId, {
+      ok: false,
+      error: "device_disconnected"
+    });
+    return {
+      ok: false,
+      code: "device_offline",
+      message: "Device is offline."
+    };
+  }
+
+  try {
+    const ack = await pendingAck;
+    if (!ack.ok) {
+      const errorCode =
+        typeof ack.error === "string" && ack.error.trim().length > 0
+          ? ack.error.trim()
+          : "device_rejected";
+      return {
+        ok: false,
+        code: errorCode,
+        message: "Device rejected control command.",
+        details: {
+          command_id: commandId,
+          operation: params.operation
         }
       };
     }
@@ -1003,6 +1140,37 @@ function handleClientSocket(
           reboot
         };
       }
+    } else if (scope === "device") {
+      const operationRaw =
+        (typeof message.operation === "string" ? message.operation : null) ??
+        (typeof message.action === "string" ? message.action : null) ??
+        "";
+      const operation = operationRaw.trim().toLowerCase();
+      if (operation === "reboot" || operation === "restart") {
+        command = {
+          scope: "device",
+          operation: "reboot"
+        };
+      } else if (
+        operation === "factory_reset" ||
+        operation === "factory-reset" ||
+        operation === "factory" ||
+        operation === "reset_factory"
+      ) {
+        command = {
+          scope: "device",
+          operation: "factory_reset"
+        };
+      } else {
+        sendJson(socket, {
+          type: "cmd_ack",
+          ok: false,
+          code: "validation_error",
+          message: "operation must be reboot or factory_reset for device scope.",
+          request_id: requestId
+        });
+        return;
+      }
     } else if (scope === "all") {
       if (action !== "on" && action !== "off") {
         sendJson(socket, {
@@ -1097,6 +1265,40 @@ function handleClientSocket(
               operation: command.operation,
               reboot: command.reboot,
               latency_ms: wifiCommandResult.latencyMs
+            }
+          });
+          return;
+        }
+
+        if (command.scope === "device") {
+          const deviceControlResult = await sendDeviceControlCommand({
+            userId: actorUserId,
+            role: actorRole,
+            deviceId,
+            operation: command.operation,
+            timeoutMs: timeoutMs ?? DEVICE_CONTROL_COMMAND_TIMEOUT_MS
+          });
+          if (!deviceControlResult.ok) {
+            sendJson(socket, {
+              type: "cmd_ack",
+              ok: false,
+              code: deviceControlResult.code,
+              message: deviceControlResult.message,
+              details: deviceControlResult.details ?? null,
+              request_id: requestId
+            });
+            return;
+          }
+          sendJson(socket, {
+            type: "cmd_ack",
+            ok: true,
+            request_id: requestId,
+            result: {
+              device_id: deviceId,
+              device_uid: deviceControlResult.deviceUid,
+              scope: "device",
+              operation: command.operation,
+              latency_ms: deviceControlResult.latencyMs
             }
           });
           return;

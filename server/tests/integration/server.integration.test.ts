@@ -183,6 +183,24 @@ async function connectDeviceWs(
 
     if (parsed.type === "config_update") {
       receivedConfigUpdates.push(parsed);
+      return;
+    }
+
+    if (parsed.type === "device_control") {
+      if (ackMode === "disconnect_on_command") {
+        ws.close(1011, "intentional_disconnect_before_ack");
+        return;
+      }
+      if (ackMode !== "drop_ack_keep_state" && ackMode !== "drop_ack_no_state") {
+        ws.send(
+          JSON.stringify({
+            type: "ack",
+            command_id: parsed.command_id,
+            ok: true,
+            ts: nowIso()
+          })
+        );
+      }
     }
   });
 
@@ -431,6 +449,36 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
       );
       return relays.rows.length === 3 && relays.rows.every((row) => row.is_on === true);
     }, 10_000);
+
+    clientWs.ws.send(
+      JSON.stringify({
+        type: "cmd",
+        request_id: "it-cmd-device-reboot",
+        device_id: deviceId,
+        scope: "device",
+        operation: "reboot"
+      })
+    );
+
+    const rebootAck = await clientWs.waitForMessages(
+      (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-device-reboot"
+    );
+    assert.equal(rebootAck.ok, true);
+
+    clientWs.ws.send(
+      JSON.stringify({
+        type: "cmd",
+        request_id: "it-cmd-device-factory-reset",
+        device_id: deviceId,
+        scope: "device",
+        operation: "factory_reset"
+      })
+    );
+
+    const factoryResetAck = await clientWs.waitForMessages(
+      (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-device-factory-reset"
+    );
+    assert.equal(factoryResetAck.ok, true);
 
     const scheduleOnAt = new Date(Date.now() + 3_000).toISOString();
     const createdOn = await requestJson(`${httpBase}/api/v1/schedules`, {

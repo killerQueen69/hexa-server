@@ -2553,6 +2553,10 @@
                     <button data-delete-device="${escapeHtml(d.id)}" class="danger">Delete</button>
                     ${d.claim_code ? `<button data-claim-code="${escapeHtml(d.claim_code)}" class="secondary">Claim This Code</button>` : ""}
                   </div>
+                  <div class="device-action-row">
+                    <button data-device-reboot="${escapeHtml(d.id)}" class="warn" ${isOwner ? "" : "disabled"}>Reboot Device</button>
+                    <button data-device-factory-reset="${escapeHtml(d.id)}" class="danger" ${isOwner ? "" : "disabled"}>Factory Reset</button>
+                  </div>
                   <div class="grid cols-2">
                     <div>
                       <label>Wi-Fi SSID</label>
@@ -3085,6 +3089,8 @@
       const releaseDevice = target.getAttribute("data-release-device");
       const deleteDevice = target.getAttribute("data-delete-device");
       const claimCode = target.getAttribute("data-claim-code");
+      const deviceReboot = target.getAttribute("data-device-reboot");
+      const deviceFactoryReset = target.getAttribute("data-device-factory-reset");
       const wifiSet = target.getAttribute("data-wifi-set");
       const wifiClear = target.getAttribute("data-wifi-clear");
 
@@ -3157,6 +3163,43 @@
           } else {
             log(`Wi-Fi clear command sent: ${deviceId}${reboot ? " (reboot=true)" : ""}`);
           }
+          return;
+        }
+
+        if (deviceReboot || deviceFactoryReset) {
+          const deviceId = deviceReboot || deviceFactoryReset || "";
+          if (!deviceId) {
+            throw new Error("Missing device id for device control command.");
+          }
+          const device = state.devices.find((item) => item && item.id === deviceId);
+          if (!device) {
+            throw new Error("Device not found in dashboard state.");
+          }
+          if (!currentUserOwnsDevice(device)) {
+            throw new Error("forbidden: Only owner/admin can send device control commands.");
+          }
+
+          const operation = deviceFactoryReset ? "factory_reset" : "reboot";
+          if (operation === "factory_reset") {
+            const proceed = window.confirm(
+              `Factory reset ${device.name || deviceId}? This clears device credentials/config and restarts it.`
+            );
+            if (!proceed) {
+              return;
+            }
+          }
+
+          await withDeviceActionLock(deviceId, async () => {
+            await sendRealtimeCommand(
+              {
+                device_id: deviceId,
+                scope: "device",
+                operation
+              },
+              { timeoutMs: 14000 }
+            );
+          });
+          log(`Device control command sent: ${deviceId} ${operation}`);
           return;
         }
 

@@ -73,8 +73,21 @@ A restart is expected when transport mode changes:
 
 - Cloud `config_update` that changes connectivity mode schedules reboot.
 - Local MQTT `cmd/control_mode=cloud_ws` schedules reboot.
+- Cloud `config_update.connectivity.wifi` can schedule reboot when `reboot=true`.
 
 This is intentional so the device cleanly tears down one transport stack and brings up the other.
+
+## Remote Device Control (WS)
+
+Over cloud WS, firmware supports device lifecycle control messages:
+
+- `device_control` with `operation: "reboot"`:
+  - sends ACK and schedules controlled restart.
+- `device_control` with `operation: "factory_reset"`:
+  - sends ACK
+  - sends best-effort `unclaim`
+  - clears Wi-Fi credentials and persisted automation/device state
+  - restarts.
 
 ## Required Production Hardening
 
