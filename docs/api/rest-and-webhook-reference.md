@@ -355,6 +355,21 @@ Prefix: `/api/v1/ota`
 - Enforces anti-rollback floor per model/channel active releases.
 - Supports auto-signing from active signing key.
 
+#### `POST /releases/upload`
+
+- `multipart/form-data` admin endpoint for firmware upload.
+- Uploads `.bin`, computes `sha256` + `size_bytes`, stores artifact under server OTA artifact directory,
+  builds public artifact URL, then creates signed release entry.
+- Accepts optional form fields:
+  - `model`, `version`, `channel` (otherwise inferred from filename pattern `model-version-channel.bin`)
+  - `security_version`, `expires_at`, `is_active`, `metadata`, `auto_sign`
+  - manual signing fields (`signature`, `verification_key_id`, `next_verification_key_id`) when `auto_sign=false`
+
+#### `GET /artifacts/*`
+
+- Public binary artifact serving endpoint used by OTA manifests.
+- Path resolves inside configured OTA artifact root only (path traversal blocked).
+
 #### `PATCH /releases/:id`
 
 - Updates release fields, re-signs when signed fields change.

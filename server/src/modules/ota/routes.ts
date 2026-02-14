@@ -1,4 +1,10 @@
-import { FastifyInstance } from "fastify";
+import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { createHash } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
+import { access, mkdir, rename, rm, stat } from "node:fs/promises";
+import path from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import semver from "semver";
 import { z } from "zod";
 import { env } from "../../config/env";
@@ -87,6 +93,7 @@ const createReleaseSchema = z.object({
   next_verification_key_id: z.string().min(1).nullable().optional(),
   signature_alg: signatureAlgSchema.default("ecdsa-p256-sha256")
 });
+type CreateReleaseInput = z.infer<typeof createReleaseSchema>;
 
 const updateReleaseSchema = z.object({
   security_version: z.number().int().min(0).optional(),
@@ -542,7 +549,338 @@ function normalizeReleaseSize(size: string | number): number {
   return typeof size === "string" ? Number(size) : size;
 }
 
+const releaseSigningErrors = new Set([
+  "signing_key_unavailable",
+  "verification_key_not_found",
+  "next_verification_key_not_found",
+  "signature_invalid",
+  "active_signing_private_key_unavailable"
+]);
+
+function decodeURIComponentSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function parseSecurityRollbackFloor(message: string): number | null {
+  if (!message.startsWith("security_version_rollback:")) {
+    return null;
+  }
+  const floor = Number(message.slice("security_version_rollback:".length));
+  return Number.isFinite(floor) ? floor : null;
+}
+
+function sanitizeArtifactSegment(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120);
+}
+
+function inferReleaseMetadataFromFilename(filename: string): {
+  model?: string;
+  version?: string;
+  channel?: OtaChannel;
+} {
+  const baseName = path.basename(filename).replace(/\.bin$/i, "");
+  const patterns = [
+    /^(?<model>.+?)[-_](?<version>v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)[-_](?<channel>dev|beta|stable)$/i,
+    /^(?<model>.+?)[-_](?<channel>dev|beta|stable)[-_](?<version>v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = baseName.match(pattern);
+    if (!match?.groups) {
+      continue;
+    }
+    const model = String(match.groups.model ?? "").trim();
+    const version = String(match.groups.version ?? "").trim();
+    const channelCandidate = String(match.groups.channel ?? "").trim().toLowerCase();
+    const channelParsed = otaChannelSchema.safeParse(channelCandidate);
+    if (!model || !version || !channelParsed.success) {
+      continue;
+    }
+    return {
+      model,
+      version,
+      channel: channelParsed.data
+    };
+  }
+
+  return {};
+}
+
+function parseBooleanField(value: string | undefined, defaultValue: boolean): boolean {
+  if (!value) {
+    return defaultValue;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return defaultValue;
+}
+
+function readMultipartField(fields: Record<string, unknown> | undefined, name: string): string | undefined {
+  const entry = fields?.[name];
+  if (!entry) {
+    return undefined;
+  }
+  const item = Array.isArray(entry) ? entry[0] : entry;
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    return undefined;
+  }
+  const value = (item as { value?: unknown }).value;
+  if (typeof value === "undefined" || value === null) {
+    return undefined;
+  }
+  return String(value).trim();
+}
+
+function normalizeArtifactKey(rawKey: string): string | null {
+  const decoded = decodeURIComponentSafe(rawKey).replace(/\\/g, "/");
+  const segments = decoded.split("/").filter((segment) => segment.length > 0 && segment !== ".");
+  if (segments.length === 0 || segments.some((segment) => segment === "..")) {
+    return null;
+  }
+  return segments.join("/");
+}
+
+function resolveArtifactAbsolutePath(rootDir: string, key: string): string | null {
+  const normalized = normalizeArtifactKey(key);
+  if (!normalized) {
+    return null;
+  }
+  const absolute = path.resolve(rootDir, ...normalized.split("/"));
+  const normalizedRoot = path.resolve(rootDir);
+  if (absolute !== normalizedRoot && !absolute.startsWith(`${normalizedRoot}${path.sep}`)) {
+    return null;
+  }
+  return absolute;
+}
+
+function artifactRootDir(): string {
+  return path.resolve(process.cwd(), env.OTA_ARTIFACTS_DIR);
+}
+
+function buildArtifactPublicUrl(request: FastifyRequest, artifactKey: string): string {
+  const encodedKey = artifactKey.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+  const configuredBase = env.OTA_PUBLIC_BASE_URL?.replace(/\/+$/, "");
+  if (configuredBase) {
+    return `${configuredBase}/api/v1/ota/artifacts/${encodedKey}`;
+  }
+  if (env.OTA_ALLOWED_HOSTS.length === 1) {
+    return `https://${env.OTA_ALLOWED_HOSTS[0]}/api/v1/ota/artifacts/${encodedKey}`;
+  }
+
+  const hostHeader = request.headers.host;
+  const host = (Array.isArray(hostHeader) ? hostHeader[0] : hostHeader) ?? `127.0.0.1:${env.PORT}`;
+  const forwardedProtoHeader = request.headers["x-forwarded-proto"];
+  const forwardedProto = (Array.isArray(forwardedProtoHeader) ? forwardedProtoHeader[0] : forwardedProtoHeader)
+    ?.split(",")[0]
+    ?.trim()
+    ?.toLowerCase();
+  const protocol = forwardedProto || request.protocol || (env.NODE_ENV === "production" ? "https" : "http");
+  return `${protocol}://${host}/api/v1/ota/artifacts/${encodedKey}`;
+}
+
+async function writeUploadedArtifact(
+  source: NodeJS.ReadableStream,
+  destinationPath: string
+): Promise<{ sha256Hex: string; sizeBytes: number }> {
+  await mkdir(path.dirname(destinationPath), { recursive: true });
+
+  const hash = createHash("sha256");
+  let sizeBytes = 0;
+  const hashTransform = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      hash.update(chunk);
+      sizeBytes += chunk.length;
+      callback(null, chunk);
+    }
+  });
+
+  try {
+    await pipeline(source, hashTransform, createWriteStream(destinationPath, { flags: "wx" }));
+  } catch (error) {
+    await rm(destinationPath, { force: true });
+    throw error;
+  }
+
+  return {
+    sha256Hex: hash.digest("hex"),
+    sizeBytes
+  };
+}
+
+function parseMetadataField(rawMetadata: string | undefined): Record<string, unknown> {
+  if (!rawMetadata) {
+    return {};
+  }
+  const parsed = JSON.parse(rawMetadata);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("metadata_invalid");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+async function createSignedRelease(payload: CreateReleaseInput): Promise<OtaReleaseRow> {
+  const normalizedVersion = semver.clean(payload.version) ?? payload.version;
+  ensureValidSemver(normalizedVersion);
+
+  if (!isAllowedArtifactHost(payload.url)) {
+    throw new Error("ota_host_blocked");
+  }
+
+  const floor = await currentSecurityFloor({
+    model: payload.model,
+    channel: payload.channel
+  });
+  if (payload.security_version < floor) {
+    throw new Error(`security_version_rollback:${floor}`);
+  }
+
+  const manifest = buildManifestPayload({
+    version: normalizedVersion,
+    security_version: payload.security_version,
+    channel: payload.channel,
+    url: payload.url,
+    size_bytes: payload.size_bytes,
+    sha256: payload.sha256,
+    expires_at: payload.expires_at
+  });
+
+  const signatureInfo = await prepareManifestSignature({
+    manifest,
+    autoSign: payload.auto_sign,
+    providedSignature: payload.signature,
+    providedVerificationKeyId: payload.verification_key_id,
+    providedNextVerificationKeyId: payload.next_verification_key_id
+  });
+
+  const now = nowIso();
+  const inserted = await query<OtaReleaseRow>(
+    `INSERT INTO ota_releases (
+       id, model, version, security_version, channel, url, size_bytes,
+       sha256, signature_alg, signature, verification_key_id, next_verification_key_id,
+       manifest_payload, expires_at, is_active, metadata,
+       created_at, updated_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6, $7,
+       $8, 'ecdsa-p256-sha256', $9, $10, $11,
+       $12::jsonb, $13, $14, $15::jsonb,
+       $16, $17
+     )
+     RETURNING
+       id, model, version, security_version, channel, url, size_bytes,
+       sha256, signature_alg, signature, verification_key_id, next_verification_key_id,
+       manifest_payload, expires_at, is_active, metadata,
+       created_at, updated_at`,
+    [
+      newId(),
+      payload.model,
+      normalizedVersion,
+      payload.security_version,
+      payload.channel,
+      payload.url,
+      payload.size_bytes,
+      payload.sha256.toLowerCase(),
+      signatureInfo.signature,
+      signatureInfo.verificationKeyId,
+      signatureInfo.nextVerificationKeyId,
+      JSON.stringify(manifest),
+      payload.expires_at,
+      payload.is_active,
+      JSON.stringify(payload.metadata),
+      now,
+      now
+    ]
+  );
+
+  return inserted.rows[0];
+}
+
+function handleCreateReleaseError(
+  reply: FastifyReply,
+  error: unknown,
+  context: { model: string; channel: OtaChannel }
+): boolean {
+  const message = error instanceof Error ? error.message : "release_create_failed";
+  if (message === "invalid_version") {
+    sendApiError(reply, 400, "validation_error", "version must be a valid semantic version.");
+    return true;
+  }
+  if (message === "ota_host_blocked") {
+    sendApiError(reply, 400, "validation_error", "Release URL host is not allowlisted.");
+    return true;
+  }
+
+  const floor = parseSecurityRollbackFloor(message);
+  if (floor !== null) {
+    sendApiError(
+      reply,
+      409,
+      "security_version_rollback",
+      `security_version must be >= ${floor} for active ${context.model}/${context.channel} releases.`
+    );
+    return true;
+  }
+
+  if (releaseSigningErrors.has(message)) {
+    sendApiError(reply, 400, "release_signing_failed", message);
+    return true;
+  }
+
+  const pgError = error as { code?: string } | undefined;
+  if (pgError?.code === "23505") {
+    sendApiError(reply, 409, "release_exists", "Release already exists for model/version/channel.");
+    return true;
+  }
+
+  return false;
+}
+
 export async function otaRoutes(server: FastifyInstance): Promise<void> {
+  server.get("/artifacts/*", async (request, reply) => {
+    const params = request.params as { "*": string };
+    const key = normalizeArtifactKey(params["*"] ?? "");
+    if (!key) {
+      return sendApiError(reply, 400, "validation_error", "Invalid artifact path.");
+    }
+
+    const rootDir = artifactRootDir();
+    const absolutePath = resolveArtifactAbsolutePath(rootDir, key);
+    if (!absolutePath) {
+      return sendApiError(reply, 400, "validation_error", "Invalid artifact path.");
+    }
+
+    try {
+      const info = await stat(absolutePath);
+      if (!info.isFile()) {
+        return sendApiError(reply, 404, "not_found", "Artifact not found.");
+      }
+
+      reply.header("cache-control", "public, max-age=31536000, immutable");
+      reply.header("content-length", String(info.size));
+      reply.type("application/octet-stream");
+      return reply.send(createReadStream(absolutePath));
+    } catch (error) {
+      const fsError = error as { code?: string } | undefined;
+      if (fsError?.code === "ENOENT") {
+        return sendApiError(reply, 404, "not_found", "Artifact not found.");
+      }
+      throw error;
+    }
+  });
+
   server.get("/check", async (request, reply) => {
     const parsedQuery = otaCheckQuerySchema.safeParse(request.query);
     if (!parsedQuery.success) {
@@ -830,6 +1168,217 @@ export async function otaRoutes(server: FastifyInstance): Promise<void> {
     return reply.send(releases.rows.map((row) => serializeRelease(row)));
   });
 
+  server.post("/releases/upload", { preHandler: [authenticate, requireRole(["admin"])] }, async (request, reply) => {
+    let upload:
+      | {
+          filename: string;
+          mimetype: string;
+          file: NodeJS.ReadableStream;
+          fields?: Record<string, unknown>;
+        }
+      | undefined;
+
+    try {
+      upload = (await request.file({
+        limits: {
+          fileSize: env.OTA_UPLOAD_MAX_BYTES,
+          files: 1
+        }
+      })) as
+        | {
+            filename: string;
+            mimetype: string;
+            file: NodeJS.ReadableStream;
+            fields?: Record<string, unknown>;
+          }
+        | undefined;
+    } catch (error) {
+      const code = (error as { code?: string } | undefined)?.code;
+      if (code === "FST_REQ_FILE_TOO_LARGE") {
+        return sendApiError(reply, 413, "payload_too_large", "Firmware binary exceeds upload limit.");
+      }
+      throw error;
+    }
+
+    if (!upload) {
+      return sendApiError(reply, 400, "validation_error", "Missing firmware file. Use multipart field 'firmware'.");
+    }
+
+    const originalFilename = upload.filename?.trim() || "firmware.bin";
+    if (!originalFilename.toLowerCase().endsWith(".bin")) {
+      upload.file.resume();
+      return sendApiError(reply, 400, "validation_error", "Uploaded file must use .bin extension.");
+    }
+
+    const inferred = inferReleaseMetadataFromFilename(originalFilename);
+    const model = readMultipartField(upload.fields, "model") ?? inferred.model;
+    const versionRaw = readMultipartField(upload.fields, "version") ?? inferred.version;
+    const channelRaw = readMultipartField(upload.fields, "channel") ?? inferred.channel;
+
+    if (!model || !versionRaw || !channelRaw) {
+      upload.file.resume();
+      return sendApiError(
+        reply,
+        400,
+        "validation_error",
+        "model/version/channel are required. Provide fields or filename pattern model-version-channel.bin."
+      );
+    }
+
+    const channelParsed = otaChannelSchema.safeParse(String(channelRaw).toLowerCase());
+    if (!channelParsed.success) {
+      upload.file.resume();
+      return sendApiError(reply, 400, "validation_error", "channel must be one of: dev, beta, stable.");
+    }
+    const channel = channelParsed.data;
+    const normalizedVersion = semver.clean(versionRaw) ?? versionRaw.trim();
+
+    let metadata: Record<string, unknown>;
+    try {
+      metadata = parseMetadataField(readMultipartField(upload.fields, "metadata"));
+    } catch {
+      upload.file.resume();
+      return sendApiError(reply, 400, "validation_error", "metadata must be a JSON object.");
+    }
+
+    const securityVersionRaw = readMultipartField(upload.fields, "security_version");
+    const inferredFloor = await currentSecurityFloor({
+      model: model.trim(),
+      channel
+    });
+    const securityVersion = securityVersionRaw ? Number(securityVersionRaw) : inferredFloor;
+    if (!Number.isInteger(securityVersion) || securityVersion < 0) {
+      upload.file.resume();
+      return sendApiError(reply, 400, "validation_error", "security_version must be a non-negative integer.");
+    }
+
+    const expiresAtRaw = readMultipartField(upload.fields, "expires_at");
+    const expiresAt =
+      expiresAtRaw && expiresAtRaw.length > 0
+        ? expiresAtRaw
+        : new Date(Date.now() + env.OTA_RELEASE_DEFAULT_EXPIRY_HOURS * 60 * 60 * 1000).toISOString();
+    if (!z.string().datetime().safeParse(expiresAt).success) {
+      upload.file.resume();
+      return sendApiError(reply, 400, "validation_error", "expires_at must be a valid ISO timestamp.");
+    }
+
+    const isActive = parseBooleanField(readMultipartField(upload.fields, "is_active"), true);
+    const autoSign = parseBooleanField(readMultipartField(upload.fields, "auto_sign"), true);
+    const signature = readMultipartField(upload.fields, "signature");
+    const verificationKeyId = readMultipartField(upload.fields, "verification_key_id");
+    const nextVerificationField = readMultipartField(upload.fields, "next_verification_key_id");
+    const nextVerificationKeyId =
+      typeof nextVerificationField === "undefined"
+        ? undefined
+        : nextVerificationField.length > 0
+          ? nextVerificationField
+          : null;
+
+    const rootDir = artifactRootDir();
+    const tempKey = `_tmp/${newId()}.bin`;
+    const tempPath = resolveArtifactAbsolutePath(rootDir, tempKey);
+    if (!tempPath) {
+      upload.file.resume();
+      return sendApiError(reply, 500, "artifact_path_error", "Failed to prepare artifact path.");
+    }
+
+    let artifactKey = "";
+    let artifactPath = "";
+    let createdArtifactFile = false;
+    let artifactStats: { sha256Hex: string; sizeBytes: number };
+
+    try {
+      artifactStats = await writeUploadedArtifact(upload.file, tempPath);
+    } catch {
+      return sendApiError(reply, 500, "artifact_store_failed", "Failed to store uploaded firmware.");
+    }
+
+    try {
+      const modelSegment = sanitizeArtifactSegment(model) || "model";
+      const versionSegment = sanitizeArtifactSegment(normalizedVersion) || "version";
+      const baseSegment = sanitizeArtifactSegment(path.basename(originalFilename, ".bin")) || "firmware";
+      const finalName = `${baseSegment}-${artifactStats.sha256Hex.slice(0, 16)}.bin`;
+      artifactKey = `${modelSegment}/${channel}/${versionSegment}/${finalName}`;
+      artifactPath = resolveArtifactAbsolutePath(rootDir, artifactKey) ?? "";
+      if (!artifactPath) {
+        throw new Error("artifact_path_error");
+      }
+      await mkdir(path.dirname(artifactPath), { recursive: true });
+      try {
+        await access(artifactPath);
+        await rm(tempPath, { force: true });
+      } catch {
+        await rename(tempPath, artifactPath);
+        createdArtifactFile = true;
+      }
+    } catch (error) {
+      await rm(tempPath, { force: true });
+      const message = error instanceof Error ? error.message : "artifact_store_failed";
+      if (message === "artifact_path_error") {
+        return sendApiError(reply, 500, "artifact_path_error", "Failed to prepare artifact path.");
+      }
+      return sendApiError(reply, 500, "artifact_store_failed", "Failed to store uploaded firmware.");
+    }
+
+    const releasePayloadParse = createReleaseSchema.safeParse({
+      model: model.trim(),
+      version: normalizedVersion,
+      security_version: securityVersion,
+      channel,
+      url: buildArtifactPublicUrl(request, artifactKey),
+      size_bytes: artifactStats.sizeBytes,
+      sha256: artifactStats.sha256Hex,
+      expires_at: expiresAt,
+      is_active: isActive,
+      metadata: {
+        ...metadata,
+        artifact: {
+          key: artifactKey,
+          original_filename: originalFilename,
+          mime_type: upload.mimetype || "application/octet-stream",
+          uploaded_at: nowIso()
+        }
+      },
+      auto_sign: autoSign,
+      signature,
+      verification_key_id: verificationKeyId,
+      next_verification_key_id: nextVerificationKeyId
+    });
+
+    if (!releasePayloadParse.success) {
+      if (createdArtifactFile) {
+        await rm(artifactPath, { force: true });
+      }
+      return sendApiError(
+        reply,
+        400,
+        "validation_error",
+        "Invalid OTA release payload generated from upload.",
+        releasePayloadParse.error.flatten()
+      );
+    }
+
+    try {
+      const inserted = await createSignedRelease(releasePayloadParse.data);
+      return reply.code(201).send({
+        ...serializeRelease(inserted),
+        artifact: {
+          key: artifactKey,
+          size_bytes: artifactStats.sizeBytes,
+          sha256: artifactStats.sha256Hex
+        }
+      });
+    } catch (error) {
+      if (createdArtifactFile) {
+        await rm(artifactPath, { force: true });
+      }
+      if (handleCreateReleaseError(reply, error, { model: model.trim(), channel })) {
+        return;
+      }
+      throw error;
+    }
+  });
+
   server.post("/releases", { preHandler: [authenticate, requireRole(["admin"])] }, async (request, reply) => {
     const parsed = createReleaseSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -838,96 +1387,11 @@ export async function otaRoutes(server: FastifyInstance): Promise<void> {
 
     const payload = parsed.data;
     try {
-      ensureValidSemver(payload.version);
-    } catch {
-      return sendApiError(reply, 400, "validation_error", "version must be a valid semantic version.");
-    }
-    if (!isAllowedArtifactHost(payload.url)) {
-      return sendApiError(reply, 400, "validation_error", "Release URL host is not allowlisted.");
-    }
-
-    const floor = await currentSecurityFloor({
-      model: payload.model,
-      channel: payload.channel
-    });
-    if (payload.security_version < floor) {
-      return sendApiError(
-        reply,
-        409,
-        "security_version_rollback",
-        `security_version must be >= ${floor} for active ${payload.model}/${payload.channel} releases.`
-      );
-    }
-
-    const manifest = buildManifestPayload({
-      version: payload.version,
-      security_version: payload.security_version,
-      channel: payload.channel,
-      url: payload.url,
-      size_bytes: payload.size_bytes,
-      sha256: payload.sha256,
-      expires_at: payload.expires_at
-    });
-
-    let signatureInfo;
-    try {
-      signatureInfo = await prepareManifestSignature({
-        manifest,
-        autoSign: payload.auto_sign,
-        providedSignature: payload.signature,
-        providedVerificationKeyId: payload.verification_key_id,
-        providedNextVerificationKeyId: payload.next_verification_key_id
-      });
+      const inserted = await createSignedRelease(payload);
+      return reply.code(201).send(serializeRelease(inserted));
     } catch (error) {
-      const message = error instanceof Error ? error.message : "release_signing_failed";
-      return sendApiError(reply, 400, "release_signing_failed", message);
-    }
-
-    const now = nowIso();
-    try {
-      const inserted = await query<OtaReleaseRow>(
-        `INSERT INTO ota_releases (
-           id, model, version, security_version, channel, url, size_bytes,
-           sha256, signature_alg, signature, verification_key_id, next_verification_key_id,
-           manifest_payload, expires_at, is_active, metadata,
-           created_at, updated_at
-         ) VALUES (
-           $1, $2, $3, $4, $5, $6, $7,
-           $8, 'ecdsa-p256-sha256', $9, $10, $11,
-           $12::jsonb, $13, $14, $15::jsonb,
-           $16, $17
-         )
-         RETURNING
-           id, model, version, security_version, channel, url, size_bytes,
-           sha256, signature_alg, signature, verification_key_id, next_verification_key_id,
-           manifest_payload, expires_at, is_active, metadata,
-           created_at, updated_at`,
-        [
-          newId(),
-          payload.model,
-          payload.version,
-          payload.security_version,
-          payload.channel,
-          payload.url,
-          payload.size_bytes,
-          payload.sha256.toLowerCase(),
-          signatureInfo.signature,
-          signatureInfo.verificationKeyId,
-          signatureInfo.nextVerificationKeyId,
-          JSON.stringify(manifest),
-          payload.expires_at,
-          payload.is_active,
-          JSON.stringify(payload.metadata),
-          now,
-          now
-        ]
-      );
-
-      return reply.code(201).send(serializeRelease(inserted.rows[0]));
-    } catch (error) {
-      const pgError = error as { code?: string; constraint?: string } | undefined;
-      if (pgError?.code === "23505") {
-        return sendApiError(reply, 409, "release_exists", "Release already exists for model/version/channel.");
+      if (handleCreateReleaseError(reply, error, { model: payload.model, channel: payload.channel })) {
+        return;
       }
       throw error;
     }

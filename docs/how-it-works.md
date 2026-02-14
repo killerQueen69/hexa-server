@@ -120,6 +120,8 @@ This avoids future schema rewrites for new device classes.
 - OTA releases are stored in `ota_releases`.
 - Server supports channels: `dev`, `beta`, `stable`.
 - `security_version` is enforced for anti-rollback.
+- Admin can upload firmware `.bin` directly; server computes artifact hash/size,
+  stores artifact under OTA storage path, generates artifact URL, and creates signed release metadata.
 
 ### 7.2 Manifest Signing
 

@@ -27,6 +27,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@fastify/multipart": "^9.2.1",
     "@fastify/jwt": "^9.1.0",
     "bcrypt": "^6.0.0",
     "cron-parser": "^5.5.0",

@@ -2,6 +2,7 @@ import fastify from "fastify";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import jwt from "@fastify/jwt";
+import multipart from "@fastify/multipart";
 import { env } from "./config/env";
 import { query } from "./db/connection";
 import { sendApiError } from "./http/api-error";
@@ -32,6 +33,13 @@ export function buildApp() {
     requestIdHeader: "x-request-id",
     requestIdLogLabel: "request_id",
     trustProxy: env.TRUST_PROXY
+  });
+  app.register(multipart, {
+    limits: {
+      fileSize: env.OTA_UPLOAD_MAX_BYTES,
+      files: 1,
+      fields: 24
+    }
   });
 
   if (env.NODE_ENV === "production" && env.ENFORCE_HTTPS) {

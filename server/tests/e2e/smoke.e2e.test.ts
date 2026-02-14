@@ -164,6 +164,41 @@ test("e2e smoke: admin ops + ota signing", async () => {
     assert.equal(release.body.verification_key_id, activeKeyId);
     assert.equal(release.body.next_verification_key_id, nextKeyId);
 
+    const uploadVersion = `9.${Math.floor(Date.now() / 1000)}.9`;
+    const uploadPayload = `smoke-upload-${uploadVersion}`;
+    const uploadForm = new FormData();
+    uploadForm.set(
+      "firmware",
+      new Blob([uploadPayload], { type: "application/octet-stream" }),
+      `hexa-mini-switch-v1-${uploadVersion}-stable.bin`
+    );
+    uploadForm.set("model", "hexa-mini-switch-v1");
+    uploadForm.set("version", uploadVersion);
+    uploadForm.set("channel", "stable");
+    uploadForm.set("security_version", "1");
+    uploadForm.set("auto_sign", "true");
+
+    const uploadResponse = await fetch(`${baseUrl}/api/v1/ota/releases/upload`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`
+      },
+      body: uploadForm
+    });
+    const uploadText = await uploadResponse.text();
+    const uploadBody = uploadText.length > 0 ? (JSON.parse(uploadText) as JsonObject) : {};
+
+    assert.equal(uploadResponse.status, 201);
+    assert.equal(uploadBody.model, "hexa-mini-switch-v1");
+    assert.equal(uploadBody.version, uploadVersion);
+    assert.equal(uploadBody.sha256, sha256(uploadPayload));
+
+    const artifactUrl = String(uploadBody.url || "");
+    const artifactResponse = await fetch(artifactUrl);
+    assert.equal(artifactResponse.status, 200);
+    const artifactBytes = await artifactResponse.arrayBuffer();
+    assert.equal(Buffer.from(artifactBytes).toString("utf8"), uploadPayload);
+
     const rollbackCandidate = await requestJson(`${baseUrl}/api/v1/ota/releases`, {
       method: "POST",
       headers: authHeaders,
