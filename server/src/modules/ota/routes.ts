@@ -692,6 +692,46 @@ function buildArtifactPublicUrl(request: FastifyRequest, artifactKey: string): s
   return `${protocol}://${host}/api/v1/ota/artifacts/${encodedKey}`;
 }
 
+function isUploadTooLargeError(error: unknown): boolean {
+  const code = (error as { code?: string } | undefined)?.code;
+  if (code === "FST_REQ_FILE_TOO_LARGE") {
+    return true;
+  }
+  const message = (error as { message?: string } | undefined)?.message ?? "";
+  return typeof message === "string" && message.toLowerCase().includes("too large");
+}
+
+function sendArtifactStoreError(reply: FastifyReply, error: unknown, rootDir: string) {
+  const fsCode = (error as { code?: string } | undefined)?.code ?? null;
+  const message = (error as { message?: string } | undefined)?.message ?? "unknown_error";
+
+  if (isUploadTooLargeError(error)) {
+    return sendApiError(reply, 413, "payload_too_large", "Firmware binary exceeds upload limit.", {
+      upload_limit_bytes: env.OTA_UPLOAD_MAX_BYTES
+    });
+  }
+
+  if (fsCode === "ENOSPC") {
+    return sendApiError(reply, 507, "insufficient_storage", "Server disk is full while storing firmware.", {
+      code: fsCode,
+      root_dir: rootDir
+    });
+  }
+
+  if (fsCode === "EACCES" || fsCode === "EPERM" || fsCode === "EROFS") {
+    return sendApiError(reply, 500, "artifact_store_failed", "OTA artifact directory is not writable.", {
+      code: fsCode,
+      root_dir: rootDir
+    });
+  }
+
+  return sendApiError(reply, 500, "artifact_store_failed", "Failed to store uploaded firmware.", {
+    code: fsCode,
+    reason: message,
+    root_dir: rootDir
+  });
+}
+
 async function writeUploadedArtifact(
   source: NodeJS.ReadableStream,
   destinationPath: string
@@ -1289,8 +1329,8 @@ export async function otaRoutes(server: FastifyInstance): Promise<void> {
 
     try {
       artifactStats = await writeUploadedArtifact(upload.file, tempPath);
-    } catch {
-      return sendApiError(reply, 500, "artifact_store_failed", "Failed to store uploaded firmware.");
+    } catch (error) {
+      return sendArtifactStoreError(reply, error, rootDir);
     }
 
     try {
@@ -1317,7 +1357,7 @@ export async function otaRoutes(server: FastifyInstance): Promise<void> {
       if (message === "artifact_path_error") {
         return sendApiError(reply, 500, "artifact_path_error", "Failed to prepare artifact path.");
       }
-      return sendApiError(reply, 500, "artifact_store_failed", "Failed to store uploaded firmware.");
+      return sendArtifactStoreError(reply, error, rootDir);
     }
 
     const releasePayloadParse = createReleaseSchema.safeParse({

@@ -45,6 +45,21 @@ export function canonicalManifestString(payload: OtaManifestPayload): string {
   return JSON.stringify(sortDeep(canonical));
 }
 
+function normalizePublicKeyPem(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.includes("-----BEGIN PUBLIC KEY-----")) {
+    return `${trimmed}\n`;
+  }
+
+  const base64 = trimmed.replace(/\s+/g, "");
+  if (!/^[A-Za-z0-9+/=]+$/.test(base64)) {
+    return raw;
+  }
+
+  const lines = base64.match(/.{1,64}/g) ?? [base64];
+  return `-----BEGIN PUBLIC KEY-----\n${lines.join("\n")}\n-----END PUBLIC KEY-----\n`;
+}
+
 export function signManifestPayload(payload: OtaManifestPayload, privateKeyPem: string): string {
   const signer = createSign("SHA256");
   signer.update(canonicalManifestString(payload));
@@ -65,11 +80,16 @@ export function verifyManifestSignature(
   const verifier = createVerify("SHA256");
   verifier.update(canonicalManifestString(payload));
   verifier.end();
-  return verifier.verify(
-    {
-      key: publicKeyPem,
-      dsaEncoding: "ieee-p1363"
-    },
-    Buffer.from(signature, "base64url")
-  );
+  const normalizedPublicKeyPem = normalizePublicKeyPem(publicKeyPem);
+  try {
+    return verifier.verify(
+      {
+        key: normalizedPublicKeyPem,
+        dsaEncoding: "ieee-p1363"
+      },
+      Buffer.from(signature, "base64url")
+    );
+  } catch {
+    return false;
+  }
 }
