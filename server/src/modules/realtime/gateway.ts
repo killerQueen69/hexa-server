@@ -35,7 +35,19 @@ type ClientDeviceControlCommand = {
   operation: "reboot" | "factory_reset";
 };
 
-type ClientCommand = ClientRelayCommand | ClientWifiCommand | ClientDeviceControlCommand;
+type OtaChannel = "dev" | "beta" | "stable";
+
+type ClientOtaCommand = {
+  scope: "ota";
+  operation: "check" | "install";
+  channel?: OtaChannel;
+};
+
+type ClientCommand =
+  | ClientRelayCommand
+  | ClientWifiCommand
+  | ClientDeviceControlCommand
+  | ClientOtaCommand;
 
 type RawWebSocket = {
   readyState: number;
@@ -70,6 +82,7 @@ const DEVICE_OFFLINE_GRACE_MS = 5_000;
 const DEVICE_COMMAND_QUEUE_MAX = 40;
 const WIFI_CONFIG_COMMAND_TIMEOUT_MS = 12_000;
 const DEVICE_CONTROL_COMMAND_TIMEOUT_MS = 8_000;
+const OTA_CONTROL_COMMAND_TIMEOUT_MS = 12_000;
 const WIFI_SSID_MAX_LEN = 32;
 const WIFI_PASSWORD_MAX_LEN = 63;
 const pendingOfflineTimers = new Map<string, NodeJS.Timeout>();
@@ -502,6 +515,148 @@ async function sendDeviceControlCommand(params: {
         details: {
           command_id: commandId,
           operation: params.operation
+        }
+      };
+    }
+    return {
+      ok: true,
+      deviceUid: row.device_uid,
+      latencyMs: ack.latencyMs
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message === "ack_timeout") {
+      return {
+        ok: false,
+        code: "device_unreachable",
+        message: "Timed out waiting for device acknowledgement.",
+        details: {
+          command_id: commandId,
+          timeout_ms: params.timeoutMs
+        }
+      };
+    }
+    if (error instanceof Error && error.message === "device_disconnected") {
+      return {
+        ok: false,
+        code: "device_offline",
+        message: "Device disconnected before acknowledgement.",
+        details: {
+          command_id: commandId
+        }
+      };
+    }
+    return {
+      ok: false,
+      code: "device_ack_failed",
+      message: "Device acknowledgement failed.",
+      details: {
+        command_id: commandId
+      }
+    };
+  }
+}
+
+async function sendOtaControlCommand(params: {
+  userId: string;
+  role: string;
+  deviceId: string;
+  operation: "check" | "install";
+  channel?: OtaChannel;
+  timeoutMs: number;
+}): Promise<
+  | { ok: true; deviceUid: string; latencyMs: number }
+  | {
+      ok: false;
+      code: string;
+      message: string;
+      details?: Record<string, unknown>;
+    }
+> {
+  const isAdminActor = params.role === "admin";
+  const lookup = isAdminActor
+    ? await query<{ device_uid: string; is_active: boolean }>(
+        `SELECT device_uid, is_active
+         FROM devices
+         WHERE id = $1
+         LIMIT 1`,
+        [params.deviceId]
+      )
+    : await query<{ device_uid: string; is_active: boolean }>(
+        `SELECT device_uid, is_active
+         FROM devices
+         WHERE id = $1
+           AND owner_user_id = $2
+         LIMIT 1`,
+        [params.deviceId, params.userId]
+      );
+  const row = lookup.rows[0];
+  if (!row) {
+    return isAdminActor
+      ? {
+          ok: false,
+          code: "not_found",
+          message: "Device not found."
+        }
+      : {
+          ok: false,
+          code: "forbidden",
+          message: "Only the device owner can control this device."
+        };
+  }
+  if (!row.is_active) {
+    return {
+      ok: false,
+      code: "device_inactive",
+      message: "Device is inactive."
+    };
+  }
+
+  const commandId = newId();
+  const pendingAck = realtimeHub.createPendingAck(commandId, row.device_uid, params.timeoutMs);
+  const payload =
+    typeof params.channel === "string"
+      ? {
+          type: "ota_control",
+          command_id: commandId,
+          operation: params.operation,
+          channel: params.channel,
+          ts: nowIso()
+        }
+      : {
+          type: "ota_control",
+          command_id: commandId,
+          operation: params.operation,
+          ts: nowIso()
+        };
+
+  const sent = realtimeHub.sendToDevice(row.device_uid, payload);
+  if (!sent) {
+    realtimeHub.resolveAck(commandId, {
+      ok: false,
+      error: "device_disconnected"
+    });
+    return {
+      ok: false,
+      code: "device_offline",
+      message: "Device is offline."
+    };
+  }
+
+  try {
+    const ack = await pendingAck;
+    if (!ack.ok) {
+      const errorCode =
+        typeof ack.error === "string" && ack.error.trim().length > 0
+          ? ack.error.trim()
+          : "device_rejected";
+      return {
+        ok: false,
+        code: errorCode,
+        message: "Device rejected OTA command.",
+        details: {
+          command_id: commandId,
+          operation: params.operation,
+          channel: params.channel ?? null
         }
       };
     }
@@ -1140,6 +1295,40 @@ function handleClientSocket(
           reboot
         };
       }
+    } else if (scope === "ota") {
+      const operationRaw =
+        (typeof message.operation === "string" ? message.operation : null) ??
+        (typeof message.action === "string" ? message.action : null) ??
+        "";
+      const operation = operationRaw.trim().toLowerCase();
+      if (operation !== "check" && operation !== "install") {
+        sendJson(socket, {
+          type: "cmd_ack",
+          ok: false,
+          code: "validation_error",
+          message: "operation must be check or install for ota scope.",
+          request_id: requestId
+        });
+        return;
+      }
+
+      const channelRaw = typeof message.channel === "string" ? message.channel.trim().toLowerCase() : "";
+      if (channelRaw && channelRaw !== "dev" && channelRaw !== "beta" && channelRaw !== "stable") {
+        sendJson(socket, {
+          type: "cmd_ack",
+          ok: false,
+          code: "validation_error",
+          message: "channel must be one of: dev, beta, stable.",
+          request_id: requestId
+        });
+        return;
+      }
+
+      command = {
+        scope: "ota",
+        operation,
+        channel: channelRaw ? (channelRaw as OtaChannel) : undefined
+      };
     } else if (scope === "device") {
       const operationRaw =
         (typeof message.operation === "string" ? message.operation : null) ??
@@ -1299,6 +1488,42 @@ function handleClientSocket(
               scope: "device",
               operation: command.operation,
               latency_ms: deviceControlResult.latencyMs
+            }
+          });
+          return;
+        }
+
+        if (command.scope === "ota") {
+          const otaControlResult = await sendOtaControlCommand({
+            userId: actorUserId,
+            role: actorRole,
+            deviceId,
+            operation: command.operation,
+            channel: command.channel,
+            timeoutMs: timeoutMs ?? OTA_CONTROL_COMMAND_TIMEOUT_MS
+          });
+          if (!otaControlResult.ok) {
+            sendJson(socket, {
+              type: "cmd_ack",
+              ok: false,
+              code: otaControlResult.code,
+              message: otaControlResult.message,
+              details: otaControlResult.details ?? null,
+              request_id: requestId
+            });
+            return;
+          }
+          sendJson(socket, {
+            type: "cmd_ack",
+            ok: true,
+            request_id: requestId,
+            result: {
+              device_id: deviceId,
+              device_uid: otaControlResult.deviceUid,
+              scope: "ota",
+              operation: command.operation,
+              channel: command.channel ?? null,
+              latency_ms: otaControlResult.latencyMs
             }
           });
           return;

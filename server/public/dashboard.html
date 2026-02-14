@@ -1158,7 +1158,21 @@
         const uid = typeof message.device_uid === "string" ? message.device_uid : "device";
         const eventType = typeof message.event_type === "string" ? message.event_type : "status";
         const status = typeof message.status === "string" ? message.status : "unknown";
-        log(`OTA status: ${uid} ${eventType} ${status}`);
+        const reason = typeof message.reason === "string" && message.reason ? ` reason=${message.reason}` : "";
+        const fromVersion = typeof message.from_version === "string" && message.from_version
+          ? ` from=${message.from_version}`
+          : "";
+        const toVersion = typeof message.to_version === "string" && message.to_version
+          ? ` to=${message.to_version}`
+          : "";
+        const securityVersion =
+          typeof message.security_version === "number"
+            ? ` security=${message.security_version}`
+            : "";
+        const commandId = typeof message.command_id === "string" && message.command_id
+          ? ` cmd=${message.command_id}`
+          : "";
+        log(`OTA status: ${uid} ${eventType} ${status}${reason}${fromVersion}${toVersion}${securityVersion}${commandId}`);
         return;
       }
 
@@ -2542,6 +2556,10 @@
                     <button data-device-reboot="${escapeHtml(d.id)}" class="warn" ${isOwner ? "" : "disabled"}>Reboot Device</button>
                     <button data-device-factory-reset="${escapeHtml(d.id)}" class="danger" ${isOwner ? "" : "disabled"}>Factory Reset</button>
                   </div>
+                  <div class="device-action-row">
+                    <button data-ota-check="${escapeHtml(d.id)}" class="secondary" ${isOwner ? "" : "disabled"}>Check OTA</button>
+                    <button data-ota-install="${escapeHtml(d.id)}" class="warn" ${isOwner ? "" : "disabled"}>Install OTA</button>
+                  </div>
                   <div class="grid cols-2">
                     <div>
                       <label>Wi-Fi SSID</label>
@@ -3051,6 +3069,8 @@
       const claimCode = target.getAttribute("data-claim-code");
       const deviceReboot = target.getAttribute("data-device-reboot");
       const deviceFactoryReset = target.getAttribute("data-device-factory-reset");
+      const otaCheck = target.getAttribute("data-ota-check");
+      const otaInstall = target.getAttribute("data-ota-install");
       const wifiSet = target.getAttribute("data-wifi-set");
       const wifiClear = target.getAttribute("data-wifi-clear");
 
@@ -3160,6 +3180,43 @@
             );
           });
           log(`Device control command sent: ${deviceId} ${operation}`);
+          return;
+        }
+
+        if (otaCheck || otaInstall) {
+          const deviceId = otaCheck || otaInstall || "";
+          if (!deviceId) {
+            throw new Error("Missing device id for OTA command.");
+          }
+          const device = state.devices.find((item) => item && item.id === deviceId);
+          if (!device) {
+            throw new Error("Device not found in dashboard state.");
+          }
+          if (!currentUserOwnsDevice(device)) {
+            throw new Error("forbidden: Only owner/admin can send OTA commands.");
+          }
+
+          const operation = otaInstall ? "install" : "check";
+          const releaseChannelEl = $("releaseChannel");
+          const releaseChannel =
+            releaseChannelEl &&
+            typeof releaseChannelEl.value === "string" &&
+            /^(dev|beta|stable)$/i.test(releaseChannelEl.value.trim())
+              ? releaseChannelEl.value.trim().toLowerCase()
+              : "";
+          const commandPayload = {
+            device_id: deviceId,
+            scope: "ota",
+            operation
+          };
+          if (releaseChannel) {
+            commandPayload.channel = releaseChannel;
+          }
+
+          await withDeviceActionLock(deviceId, async () => {
+            await sendRealtimeCommand(commandPayload, { timeoutMs: 22000 });
+          });
+          log(`OTA command sent: ${deviceId} ${operation}${releaseChannel ? ` channel=${releaseChannel}` : ""}`);
           return;
         }
 

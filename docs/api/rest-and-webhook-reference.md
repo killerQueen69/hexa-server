@@ -326,7 +326,10 @@ Prefix: `/api/v1/ota`
   - optional `token` (device token)
 - Returns either:
   - `update_available: false`
-  - or signed `manifest` with verification key IDs.
+  - or signed `manifest` with:
+    - `signature`
+    - `verification_key_id`
+    - `next_verification_key_id`
 
 #### `GET /manifest/:device_uid`
 
@@ -334,7 +337,10 @@ Prefix: `/api/v1/ota`
   - optional `channel`
   - optional `current`
   - optional `token`
-- Returns selected signed manifest.
+- Returns selected signed manifest, including:
+  - `signature`
+  - `verification_key_id`
+  - `next_verification_key_id`
 
 ### OTA Device Callback (Webhook-Style)
 

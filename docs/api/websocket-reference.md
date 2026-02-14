@@ -99,9 +99,16 @@ Example:
 ```json
 {
   "type": "ota_status",
+  "command_id": "uuid",
   "status": "ok",
   "event_type": "verify",
   "reason": null,
+  "from_version": "0.2.0",
+  "to_version": "0.2.1",
+  "security_version": 1,
+  "details": {
+    "channel": "stable"
+  },
   "ts": "2026-02-13T12:00:02.000Z"
 }
 ```
@@ -168,6 +175,18 @@ Sent when input config, power restore mode, or connectivity settings are changed
 
 If `connectivity.mode` changes transport mode (`cloud_ws` <-> `local_mqtt`), firmware is expected to apply config and reboot to switch stacks cleanly.
 If `connectivity.wifi.op` is `set` or `clear`, firmware applies the Wi-Fi credential update and can reboot when `reboot` is true.
+
+### `ota_control`
+
+```json
+{
+  "type": "ota_control",
+  "command_id": "uuid",
+  "operation": "check",
+  "channel": "stable",
+  "ts": "2026-02-13T12:03:00.000Z"
+}
+```
 
 ## 4. Client Channel Messages
 
@@ -270,11 +289,27 @@ Device factory reset command:
 }
 ```
 
+OTA check/install command:
+
+```json
+{
+  "type": "cmd",
+  "request_id": "req-007",
+  "device_id": "device-uuid",
+  "scope": "ota",
+  "operation": "check",
+  "channel": "stable"
+}
+```
+
 Server returns `cmd_ack` with either:
 
 - `ok: true` and command result
 - or `ok: false` with `code`/`message`
 - Command authorization: device owner can send commands; admin sessions are also allowed.
+- OTA command validation:
+  - `operation` must be `check` or `install`
+  - optional `channel` must be `dev|beta|stable`
 
 ## 4.2 Server -> Client
 

@@ -72,7 +72,7 @@ async function connectDeviceWs(
   deviceUid: string,
   deviceToken: string,
   options?: {
-    ackMode?: "normal" | "disconnect_on_command" | "drop_ack_keep_state" | "drop_ack_no_state";
+    ackMode?: "normal" | "disconnect_on_command" | "drop_ack_keep_state" | "drop_ack_no_state" | "ota_reject";
   }
 ): Promise<ConnectedDevice> {
   const relays = [false, false, false];
@@ -202,6 +202,37 @@ async function connectDeviceWs(
         );
       }
     }
+
+    if (parsed.type === "ota_control") {
+      commandCount += 1;
+      if (ackMode === "disconnect_on_command") {
+        ws.close(1011, "intentional_disconnect_before_ack");
+        return;
+      }
+      if (ackMode === "drop_ack_keep_state" || ackMode === "drop_ack_no_state") {
+        return;
+      }
+      if (ackMode === "ota_reject") {
+        ws.send(
+          JSON.stringify({
+            type: "ack",
+            command_id: parsed.command_id,
+            ok: false,
+            error: "ota_rejected_for_test",
+            ts: nowIso()
+          })
+        );
+        return;
+      }
+      ws.send(
+        JSON.stringify({
+          type: "ack",
+          command_id: parsed.command_id,
+          ok: true,
+          ts: nowIso()
+        })
+      );
+    }
   });
 
   ws.send(
@@ -321,6 +352,7 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
   let clientWs: ConnectedClient | null = null;
   let timeoutDeviceWs: ConnectedDevice | null = null;
   let fallbackAckDeviceWs: ConnectedDevice | null = null;
+  let rejectOtaDeviceWs: ConnectedDevice | null = null;
 
   try {
     const provisioned = await requestJson(`${httpBase}/api/v1/provision/register`, {
@@ -479,6 +511,56 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
       (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-device-factory-reset"
     );
     assert.equal(factoryResetAck.ok, true);
+
+    clientWs.ws.send(
+      JSON.stringify({
+        type: "cmd",
+        request_id: "it-cmd-ota-check",
+        device_id: deviceId,
+        scope: "ota",
+        operation: "check"
+      })
+    );
+
+    const otaCheckCmdAck = await clientWs.waitForMessages(
+      (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-ota-check"
+    );
+    assert.equal(otaCheckCmdAck.ok, true);
+    assert.equal((otaCheckCmdAck.result as JsonObject).scope, "ota");
+    assert.equal((otaCheckCmdAck.result as JsonObject).operation, "check");
+
+    clientWs.ws.send(
+      JSON.stringify({
+        type: "cmd",
+        request_id: "it-cmd-ota-invalid-operation",
+        device_id: deviceId,
+        scope: "ota",
+        operation: "ship_it"
+      })
+    );
+
+    const otaInvalidOperationAck = await clientWs.waitForMessages(
+      (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-ota-invalid-operation"
+    );
+    assert.equal(otaInvalidOperationAck.ok, false);
+    assert.equal(otaInvalidOperationAck.code, "validation_error");
+
+    clientWs.ws.send(
+      JSON.stringify({
+        type: "cmd",
+        request_id: "it-cmd-ota-invalid-channel",
+        device_id: deviceId,
+        scope: "ota",
+        operation: "install",
+        channel: "gold"
+      })
+    );
+
+    const otaInvalidChannelAck = await clientWs.waitForMessages(
+      (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-ota-invalid-channel"
+    );
+    assert.equal(otaInvalidChannelAck.ok, false);
+    assert.equal(otaInvalidChannelAck.code, "validation_error");
 
     const scheduleOnAt = new Date(Date.now() + 3_000).toISOString();
     const createdOn = await requestJson(`${httpBase}/api/v1/schedules`, {
@@ -1026,6 +1108,8 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
     assert.equal(otaCheck.status, 200);
     assert.equal(otaCheck.body.update_available, true);
     assert.equal((otaCheck.body.manifest as JsonObject).version, releaseVersion);
+    assert.equal(typeof (otaCheck.body.manifest as JsonObject).signature, "string");
+    assert.ok(String((otaCheck.body.manifest as JsonObject).signature).length > 10);
 
     const otaManifest = await requestJson(
       `${httpBase}/api/v1/ota/manifest/${encodeURIComponent(deviceUid)}?current=0.0.1&channel=stable&token=${encodeURIComponent(deviceToken)}`,
@@ -1036,6 +1120,8 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
     assert.equal(otaManifest.status, 200);
     assert.equal(otaManifest.body.version, releaseVersion);
     assert.equal(otaManifest.body.security_version, 1);
+    assert.equal(typeof otaManifest.body.signature, "string");
+    assert.ok(String(otaManifest.body.signature).length > 10);
 
     const otaReport = await requestJson(`${httpBase}/api/v1/ota/report`, {
       method: "POST",
@@ -1114,6 +1200,22 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
       ackMode: "drop_ack_no_state"
     });
 
+    clientWs.ws.send(
+      JSON.stringify({
+        type: "cmd",
+        request_id: "it-cmd-ota-timeout",
+        device_id: timeoutDeviceId,
+        scope: "ota",
+        operation: "install"
+      })
+    );
+
+    const otaTimeoutAck = await clientWs.waitForMessages(
+      (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-ota-timeout"
+    );
+    assert.equal(otaTimeoutAck.ok, false);
+    assert.equal(otaTimeoutAck.code, "device_unreachable");
+
     const timeoutCommand = await requestJson(`${httpBase}/api/v1/devices/${timeoutDeviceId}/relays/0`, {
       method: "POST",
       headers: {
@@ -1165,6 +1267,56 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
       ackMode: "drop_ack_keep_state"
     });
 
+    const rejectProvisioned = await requestJson(`${httpBase}/api/v1/provision/register`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        provision_key: env.DEVICE_PROVISION_KEY,
+        chip_id: `it-ota-reject-chip-${newId()}`,
+        model: "hexa-mini-switch-v1"
+      })
+    });
+    assert.equal(rejectProvisioned.status, 200);
+
+    const rejectDeviceId = String(rejectProvisioned.body.device_id);
+    const rejectDeviceUid = String(rejectProvisioned.body.device_uid);
+    const rejectDeviceToken = String(rejectProvisioned.body.device_token);
+    const rejectClaimCode = String(rejectProvisioned.body.claim_code);
+
+    const rejectClaim = await requestJson(`${httpBase}/api/v1/devices/claim`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${accessToken}`
+      },
+      body: JSON.stringify({
+        claim_code: rejectClaimCode
+      })
+    });
+    assert.equal(rejectClaim.status, 200);
+
+    rejectOtaDeviceWs = await connectDeviceWs(wsBase, rejectDeviceUid, rejectDeviceToken, {
+      ackMode: "ota_reject"
+    });
+
+    clientWs.ws.send(
+      JSON.stringify({
+        type: "cmd",
+        request_id: "it-cmd-ota-reject",
+        device_id: rejectDeviceId,
+        scope: "ota",
+        operation: "check"
+      })
+    );
+
+    const otaRejectAck = await clientWs.waitForMessages(
+      (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-ota-reject"
+    );
+    assert.equal(otaRejectAck.ok, false);
+    assert.equal(otaRejectAck.code, "ota_rejected_for_test");
+
     const fallbackAckCommand = await requestJson(`${httpBase}/api/v1/devices/${fallbackDeviceId}/relays/0`, {
       method: "POST",
       headers: {
@@ -1213,6 +1365,9 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
     }
     if (fallbackAckDeviceWs?.ws.readyState === WebSocket.OPEN) {
       fallbackAckDeviceWs.ws.close(1000, "test_done");
+    }
+    if (rejectOtaDeviceWs?.ws.readyState === WebSocket.OPEN) {
+      rejectOtaDeviceWs.ws.close(1000, "test_done");
     }
     if (clientWs?.ws.readyState === WebSocket.OPEN) {
       clientWs.ws.close(1000, "test_done");

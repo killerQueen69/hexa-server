@@ -978,6 +978,7 @@ export async function otaRoutes(server: FastifyInstance): Promise<void> {
       channel,
       manifest: {
         ...resolved.manifest,
+        signature: resolved.release.signature,
         verification_key_id: resolved.release.verification_key_id,
         next_verification_key_id: resolved.release.next_verification_key_id
       }
@@ -1030,6 +1031,7 @@ export async function otaRoutes(server: FastifyInstance): Promise<void> {
       device_uid: device.device_uid,
       model: device.model,
       ...resolved.manifest,
+      signature: resolved.release.signature,
       verification_key_id: resolved.release.verification_key_id,
       next_verification_key_id: resolved.release.next_verification_key_id
     });
