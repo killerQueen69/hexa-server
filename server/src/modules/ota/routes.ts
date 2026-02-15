@@ -1341,6 +1341,28 @@ export async function otaRoutes(server: FastifyInstance): Promise<void> {
     return reply.send(serializeRelease(updated.rows[0]));
   });
 
+  server.delete("/releases/:id", { preHandler: [authenticate, requireRole(["admin"])] }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const existing = await getReleaseById(params.id);
+    if (!existing) {
+      return sendApiError(reply, 404, "not_found", "Release not found.");
+    }
+
+    await query(
+      `DELETE FROM ota_releases
+       WHERE id = $1`,
+      [params.id]
+    );
+
+    return reply.send({
+      ok: true,
+      id: existing.id,
+      model: existing.model,
+      version: existing.version,
+      channel: existing.channel
+    });
+  });
+
   server.get("/releases/:id/verify", { preHandler: [authenticate, requireRole(["admin"])] }, async (request, reply) => {
     const params = request.params as { id: string };
     const release = await getReleaseById(params.id);

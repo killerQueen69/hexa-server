@@ -1186,7 +1186,7 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
       (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-ota-timeout"
     );
     assert.equal(otaTimeoutAck.ok, false);
-    assert.equal(otaTimeoutAck.code, "device_unreachable");
+    assert.equal(otaTimeoutAck.code, "manifest_not_found");
 
     const timeoutCommand = await requestJson(`${httpBase}/api/v1/devices/${timeoutDeviceId}/relays/0`, {
       method: "POST",

@@ -1174,11 +1174,32 @@ async function sendOtaControlCommand(params: {
 }
 
 async function updateLastSeen(deviceId: string, ip: string): Promise<void> {
+  await updateLastSeenAndFirmware(deviceId, ip, null);
+}
+
+function normalizeReportedFirmwareVersion(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return semver.valid(trimmed);
+}
+
+async function updateLastSeenAndFirmware(deviceId: string, ip: string, firmwareVersion: string | null): Promise<void> {
   await query(
     `UPDATE devices
-     SET last_seen_at = $1, last_ip = $2, updated_at = $1
+     SET last_seen_at = $1,
+         last_ip = $2,
+         firmware_version = CASE
+           WHEN $4 IS NOT NULL THEN $4
+           ELSE firmware_version
+         END,
+         updated_at = $1
      WHERE id = $3`,
-    [nowIso(), ip, deviceId]
+    [nowIso(), ip, deviceId, firmwareVersion]
   );
 }
 
@@ -1415,7 +1436,8 @@ function handleDeviceSocket(
 
     if (type === "state_report") {
       void (async () => {
-        await updateLastSeen(deviceId, req.socket.remoteAddress ?? "");
+        const reportedFirmwareVersion = normalizeReportedFirmwareVersion(message.firmware_version);
+        await updateLastSeenAndFirmware(deviceId, req.socket.remoteAddress ?? "", reportedFirmwareVersion);
 
         const relays = Array.isArray(message.relays)
           ? message.relays.filter((item): item is boolean => typeof item === "boolean")

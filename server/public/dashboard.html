@@ -549,12 +549,14 @@
         </div>
         <div class="row">
           <button id="simulateAlertsBtn" class="danger">Simulate Alerts</button>
-          <button id="clearLogBtn" class="ghost">Clear Log</button>
         </div>
       </div>
 
       <div class="card stack" data-card-id="activity-log">
-        <h2>Activity Log</h2>
+        <div class="section-title">
+          <h2>Activity Log</h2>
+          <button id="clearLogBtn" class="ghost">Clear</button>
+        </div>
         <div id="log" class="log"></div>
       </div>
     </aside>
@@ -2619,6 +2621,7 @@
                 <td>${escapeHtml(formatIsoWithOffset(r.expires_at))}</td>
                 <td>
                   <button data-verify-release="${r.id}" class="secondary">Verify</button>
+                  <button data-delete-release="${r.id}" class="danger">Delete</button>
                 </td>
               </tr>
             `).join("")}
@@ -3010,12 +3013,28 @@
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
       const verifyId = target.getAttribute("data-verify-release");
-      if (!verifyId) return;
-      try {
-        const out = await api(`/api/v1/ota/releases/${encodeURIComponent(verifyId)}/verify`, { method: "GET" });
-        log(`Release ${verifyId} verification: ${out.ok ? "OK" : `FAILED (${out.reason})`}`);
-      } catch (error) {
-        log(`Release verify failed: ${error.message}`);
+      if (verifyId) {
+        try {
+          const out = await api(`/api/v1/ota/releases/${encodeURIComponent(verifyId)}/verify`, { method: "GET" });
+          log(`Release ${verifyId} verification: ${out.ok ? "OK" : `FAILED (${out.reason})`}`);
+        } catch (error) {
+          log(`Release verify failed: ${error.message}`);
+        }
+        return;
+      }
+
+      const deleteId = target.getAttribute("data-delete-release");
+      if (deleteId) {
+        if (!window.confirm(`Delete OTA release ${deleteId}? This cannot be undone.`)) {
+          return;
+        }
+        try {
+          await api(`/api/v1/ota/releases/${encodeURIComponent(deleteId)}`, { method: "DELETE" });
+          log(`OTA release ${deleteId} deleted.`);
+          await loadOta();
+        } catch (error) {
+          log(`Release delete failed: ${error.message}`);
+        }
       }
     });
 
