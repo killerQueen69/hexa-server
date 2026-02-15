@@ -477,6 +477,21 @@
       color: var(--muted);
     }
 
+    .automation-create-grid {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .automation-create-section {
+      display: grid;
+      gap: 8px;
+      border: 1px solid #e2e7da;
+      border-radius: 8px;
+      background: #fff;
+      padding: 8px;
+    }
+
     .button-state-grid {
       display: grid;
       gap: 6px;
@@ -514,6 +529,7 @@
       .device-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .device-main-grid,
       .device-footer-grid { grid-template-columns: 1fr; }
+      .automation-create-grid { grid-template-columns: 1fr; }
     }
 
     @media (max-width: 760px) {
@@ -815,6 +831,20 @@
 
     function nowIso() {
       return new Date().toISOString();
+    }
+
+    function toDateTimeLocalValue(dateLike) {
+      const date = dateLike instanceof Date ? dateLike : new Date(dateLike);
+      if (Number.isNaN(date.getTime())) {
+        return "";
+      }
+      return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+    }
+
+    function defaultScheduleOnceLocalValue() {
+      const date = new Date(Date.now() + 5 * 60 * 1000);
+      date.setSeconds(0, 0);
+      return toDateTimeLocalValue(date);
     }
 
     function log(line) {
@@ -1442,6 +1472,260 @@
       }
     }
 
+    function syncAutomationTestingControls(deviceId) {
+      const key = String(deviceId || "").trim();
+      if (!key) {
+        return;
+      }
+
+      const triggerTypeEl = document.querySelector(`[data-automation-trigger-type="${key}"]`);
+      const inputIndexEl = document.querySelector(`[data-automation-input-index="${key}"]`);
+      const eventEl = document.querySelector(`[data-automation-event="${key}"]`);
+      const holdSecondsEl = document.querySelector(`[data-automation-hold-seconds="${key}"]`);
+      const actionTypeEl = document.querySelector(`[data-automation-action-type="${key}"]`);
+      const relayIndexEl = document.querySelector(`[data-automation-relay-index="${key}"]`);
+      const actionEl = document.querySelector(`[data-automation-action="${key}"]`);
+      const scheduleTypeEl = document.querySelector(`[data-schedule-type="${key}"]`);
+      const scheduleCronEl = document.querySelector(`[data-schedule-cron="${key}"]`);
+      const scheduleOnceAtEl = document.querySelector(`[data-schedule-once-at="${key}"]`);
+      const scheduleScopeEl = document.querySelector(`[data-schedule-target-scope="${key}"]`);
+      const scheduleRelayIndexEl = document.querySelector(`[data-schedule-relay-index="${key}"]`);
+      const scheduleActionEl = document.querySelector(`[data-schedule-action="${key}"]`);
+
+      if (
+        triggerTypeEl instanceof HTMLSelectElement &&
+        inputIndexEl instanceof HTMLSelectElement &&
+        eventEl instanceof HTMLSelectElement &&
+        holdSecondsEl instanceof HTMLInputElement
+      ) {
+        const triggerType = triggerTypeEl.value;
+        const inputBased = triggerType === "input_event" || triggerType === "button_hold";
+        inputIndexEl.disabled = !inputBased;
+        eventEl.disabled = !inputBased;
+        holdSecondsEl.disabled = triggerType !== "button_hold";
+        if (triggerType === "button_hold") {
+          eventEl.value = "hold";
+        }
+      }
+
+      if (
+        actionTypeEl instanceof HTMLSelectElement &&
+        relayIndexEl instanceof HTMLSelectElement &&
+        actionEl instanceof HTMLSelectElement
+      ) {
+        const actionType = actionTypeEl.value;
+        relayIndexEl.disabled = actionType !== "set_relay";
+        const toggleOption = Array.from(actionEl.options).find((option) => option.value === "toggle");
+        if (toggleOption) {
+          toggleOption.disabled = actionType === "set_all_relays";
+        }
+        if (actionType === "set_all_relays" && actionEl.value === "toggle") {
+          actionEl.value = "off";
+        }
+      }
+
+      if (
+        scheduleTypeEl instanceof HTMLSelectElement &&
+        scheduleCronEl instanceof HTMLInputElement &&
+        scheduleOnceAtEl instanceof HTMLInputElement
+      ) {
+        const scheduleType = scheduleTypeEl.value;
+        scheduleCronEl.disabled = scheduleType !== "cron";
+        scheduleOnceAtEl.disabled = scheduleType !== "once";
+      }
+
+      if (
+        scheduleScopeEl instanceof HTMLSelectElement &&
+        scheduleRelayIndexEl instanceof HTMLSelectElement &&
+        scheduleActionEl instanceof HTMLSelectElement
+      ) {
+        const scope = scheduleScopeEl.value;
+        scheduleRelayIndexEl.disabled = scope !== "single";
+        const toggleOption = Array.from(scheduleActionEl.options).find((option) => option.value === "toggle");
+        if (toggleOption) {
+          toggleOption.disabled = scope !== "single";
+        }
+        if (scope !== "single" && scheduleActionEl.value === "toggle") {
+          scheduleActionEl.value = "off";
+        }
+      }
+    }
+
+    function collectAutomationCreatePayload(device, card) {
+      const deviceId = String(device && device.id ? device.id : "");
+      const relayCount = Number.isInteger(device?.relay_count) ? device.relay_count : 0;
+      const buttonCount = Number.isInteger(device?.button_count) ? device.button_count : 0;
+
+      const nameEl = card.querySelector(`[data-automation-name="${deviceId}"]`);
+      const triggerTypeEl = card.querySelector(`[data-automation-trigger-type="${deviceId}"]`);
+      const inputIndexEl = card.querySelector(`[data-automation-input-index="${deviceId}"]`);
+      const eventEl = card.querySelector(`[data-automation-event="${deviceId}"]`);
+      const holdSecondsEl = card.querySelector(`[data-automation-hold-seconds="${deviceId}"]`);
+      const actionTypeEl = card.querySelector(`[data-automation-action-type="${deviceId}"]`);
+      const relayIndexEl = card.querySelector(`[data-automation-relay-index="${deviceId}"]`);
+      const actionEl = card.querySelector(`[data-automation-action="${deviceId}"]`);
+      const cooldownEl = card.querySelector(`[data-automation-cooldown="${deviceId}"]`);
+      const conditionRelayEl = card.querySelector(`[data-automation-condition-relay="${deviceId}"]`);
+      const conditionStateEl = card.querySelector(`[data-automation-condition-state="${deviceId}"]`);
+      const enabledEl = card.querySelector(`[data-automation-enabled="${deviceId}"]`);
+
+      if (!(nameEl instanceof HTMLInputElement)) throw new Error("Automation name field is missing.");
+      if (!(triggerTypeEl instanceof HTMLSelectElement)) throw new Error("Automation trigger field is missing.");
+      if (!(inputIndexEl instanceof HTMLSelectElement)) throw new Error("Automation input index field is missing.");
+      if (!(eventEl instanceof HTMLSelectElement)) throw new Error("Automation event field is missing.");
+      if (!(holdSecondsEl instanceof HTMLInputElement)) throw new Error("Automation hold field is missing.");
+      if (!(actionTypeEl instanceof HTMLSelectElement)) throw new Error("Automation action type field is missing.");
+      if (!(relayIndexEl instanceof HTMLSelectElement)) throw new Error("Automation relay index field is missing.");
+      if (!(actionEl instanceof HTMLSelectElement)) throw new Error("Automation action field is missing.");
+      if (!(cooldownEl instanceof HTMLInputElement)) throw new Error("Automation cooldown field is missing.");
+      if (!(conditionRelayEl instanceof HTMLSelectElement)) throw new Error("Automation condition relay field is missing.");
+      if (!(conditionStateEl instanceof HTMLSelectElement)) throw new Error("Automation condition state field is missing.");
+      if (!(enabledEl instanceof HTMLInputElement)) throw new Error("Automation enabled field is missing.");
+
+      const name = nameEl.value.trim();
+      if (!name) {
+        throw new Error("Automation name is required.");
+      }
+
+      const triggerType = triggerTypeEl.value;
+      const triggerConfig = {};
+
+      if (triggerType === "input_event" || triggerType === "button_hold") {
+        const inputIndex = Number.parseInt(inputIndexEl.value, 10);
+        if (!Number.isInteger(inputIndex) || inputIndex < 0 || inputIndex >= buttonCount) {
+          throw new Error("Automation input index is invalid.");
+        }
+        triggerConfig.input_index = inputIndex;
+        const event = eventEl.value.trim();
+        if (event) {
+          triggerConfig.event = event;
+        }
+      }
+
+      if (triggerType === "button_hold") {
+        const holdSeconds = Number.parseInt(holdSecondsEl.value, 10);
+        if (!Number.isInteger(holdSeconds) || holdSeconds < 1 || holdSeconds > 600) {
+          throw new Error("Hold seconds must be between 1 and 600.");
+        }
+        triggerConfig.hold_seconds = holdSeconds;
+        triggerConfig.event = "hold";
+      }
+
+      const actionType = actionTypeEl.value;
+      const action = actionEl.value;
+      const actionConfig = { action };
+
+      if (actionType === "set_relay") {
+        const relayIndex = Number.parseInt(relayIndexEl.value, 10);
+        if (!Number.isInteger(relayIndex) || relayIndex < 0 || relayIndex >= relayCount) {
+          throw new Error("Automation relay index is invalid.");
+        }
+        actionConfig.relay_index = relayIndex;
+      } else if (action === "toggle") {
+        throw new Error("set_all_relays supports on/off only.");
+      }
+
+      const cooldownSeconds = Number.parseInt(cooldownEl.value || "0", 10);
+      if (!Number.isInteger(cooldownSeconds) || cooldownSeconds < 0 || cooldownSeconds > 86400) {
+        throw new Error("Cooldown must be between 0 and 86400 seconds.");
+      }
+
+      const conditionConfig = {};
+      const conditionRelay = Number.parseInt(conditionRelayEl.value, 10);
+      if (Number.isInteger(conditionRelay) && conditionRelay >= 0 && conditionRelay < relayCount) {
+        const stateValue = conditionStateEl.value === "on";
+        conditionConfig.required_relay_state = {
+          relay_index: conditionRelay,
+          is_on: stateValue
+        };
+      }
+
+      return {
+        name,
+        trigger_type: triggerType,
+        trigger_config: triggerConfig,
+        condition_config: conditionConfig,
+        action_type: actionType,
+        action_config: actionConfig,
+        cooldown_seconds: cooldownSeconds,
+        is_enabled: enabledEl.checked
+      };
+    }
+
+    function collectScheduleCreatePayload(device, card) {
+      const deviceId = String(device && device.id ? device.id : "");
+      const relayCount = Number.isInteger(device?.relay_count) ? device.relay_count : 0;
+
+      const nameEl = card.querySelector(`[data-schedule-name="${deviceId}"]`);
+      const typeEl = card.querySelector(`[data-schedule-type="${deviceId}"]`);
+      const cronEl = card.querySelector(`[data-schedule-cron="${deviceId}"]`);
+      const onceAtEl = card.querySelector(`[data-schedule-once-at="${deviceId}"]`);
+      const timezoneEl = card.querySelector(`[data-schedule-timezone="${deviceId}"]`);
+      const scopeEl = card.querySelector(`[data-schedule-target-scope="${deviceId}"]`);
+      const relayIndexEl = card.querySelector(`[data-schedule-relay-index="${deviceId}"]`);
+      const actionEl = card.querySelector(`[data-schedule-action="${deviceId}"]`);
+      const enabledEl = card.querySelector(`[data-schedule-enabled="${deviceId}"]`);
+
+      if (!(nameEl instanceof HTMLInputElement)) throw new Error("Schedule name field is missing.");
+      if (!(typeEl instanceof HTMLSelectElement)) throw new Error("Schedule type field is missing.");
+      if (!(cronEl instanceof HTMLInputElement)) throw new Error("Schedule cron field is missing.");
+      if (!(onceAtEl instanceof HTMLInputElement)) throw new Error("Schedule time field is missing.");
+      if (!(timezoneEl instanceof HTMLInputElement)) throw new Error("Schedule timezone field is missing.");
+      if (!(scopeEl instanceof HTMLSelectElement)) throw new Error("Schedule scope field is missing.");
+      if (!(relayIndexEl instanceof HTMLSelectElement)) throw new Error("Schedule relay index field is missing.");
+      if (!(actionEl instanceof HTMLSelectElement)) throw new Error("Schedule action field is missing.");
+      if (!(enabledEl instanceof HTMLInputElement)) throw new Error("Schedule enabled field is missing.");
+
+      const scheduleType = typeEl.value;
+      const targetScope = scopeEl.value;
+      const action = actionEl.value;
+      const timezone = timezoneEl.value.trim() || "UTC";
+
+      if (targetScope === "all" && action === "toggle") {
+        throw new Error("All-relays schedules support on/off only.");
+      }
+
+      const payload = {
+        target_scope: targetScope,
+        relay_index: null,
+        name: nameEl.value.trim() || null,
+        schedule_type: scheduleType,
+        cron_expression: null,
+        execute_at: null,
+        timezone,
+        action,
+        is_enabled: enabledEl.checked
+      };
+
+      if (targetScope === "single") {
+        const relayIndex = Number.parseInt(relayIndexEl.value, 10);
+        if (!Number.isInteger(relayIndex) || relayIndex < 0 || relayIndex >= relayCount) {
+          throw new Error("Schedule relay index is invalid.");
+        }
+        payload.relay_index = relayIndex;
+      }
+
+      if (scheduleType === "cron") {
+        const cronExpression = cronEl.value.trim();
+        if (!cronExpression) {
+          throw new Error("Cron expression is required for cron schedules.");
+        }
+        payload.cron_expression = cronExpression;
+      } else {
+        const onceLocal = onceAtEl.value.trim();
+        if (!onceLocal) {
+          throw new Error("Execution time is required for once schedules.");
+        }
+        const parsed = new Date(onceLocal);
+        if (Number.isNaN(parsed.getTime())) {
+          throw new Error("Execution time is invalid.");
+        }
+        payload.execute_at = parsed.toISOString();
+      }
+
+      return payload;
+    }
+
     function renderAutomationTesting(device) {
       if (!isAdminUser()) {
         return "";
@@ -1456,6 +1740,29 @@
       const loadLabel = testing.loading ? "Loading..." : "Load Rules";
       const loadDisabled = claimed ? (testing.loading ? "disabled" : "") : "disabled";
       const loadedAtText = testing.loadedAt ? formatIsoWithOffset(testing.loadedAt) : "-";
+      const relayNames = Array.isArray(device?.relay_names) ? device.relay_names : [];
+      const relayCount = Number.isInteger(device?.relay_count) ? device.relay_count : 0;
+      const buttonCount = Number.isInteger(device?.button_count) ? device.button_count : 0;
+      const relayOptions = relayCount > 0
+        ? Array.from({ length: relayCount }, (_, relayIndex) => {
+            const relayName = typeof relayNames[relayIndex] === "string"
+              ? relayNames[relayIndex]
+              : `Relay ${relayIndex + 1}`;
+            return `<option value="${relayIndex}">R${relayIndex} - ${escapeHtml(relayName)}</option>`;
+          }).join("")
+        : '<option value="">No relays</option>';
+      const relayConditionOptions = relayCount > 0
+        ? `<option value="">none</option>${Array.from({ length: relayCount }, (_, relayIndex) => {
+            const relayName = typeof relayNames[relayIndex] === "string"
+              ? relayNames[relayIndex]
+              : `Relay ${relayIndex + 1}`;
+            return `<option value="${relayIndex}">R${relayIndex} - ${escapeHtml(relayName)}</option>`;
+          }).join("")}`
+        : '<option value="">none</option>';
+      const buttonOptions = buttonCount > 0
+        ? Array.from({ length: buttonCount }, (_, inputIndex) => `<option value="${inputIndex}">B${inputIndex}</option>`).join("")
+        : '<option value="">No buttons</option>';
+      const onceLocalDefault = defaultScheduleOnceLocalValue();
 
       const automationRows = testing.automations.length > 0
         ? testing.automations.map((rule) => {
@@ -1511,6 +1818,162 @@
             <div class="meta">claimed: ${claimed ? "yes" : "no"} | loaded_at: ${escapeHtml(loadedAtText)}</div>
             ${testing.error ? `<div class="meta" style="color: var(--danger);">${escapeHtml(testing.error)}</div>` : ""}
             ${!claimed ? '<div class="muted">Run-now controls are available only for claimed devices.</div>' : ""}
+            <div class="automation-create-grid">
+              <section class="automation-create-section">
+                <div class="meta"><strong>Create Automation</strong></div>
+                <div>
+                  <label>Name</label>
+                  <input data-automation-name="${escapeHtml(deviceId)}" placeholder="Example: Hold B0 turns all off" />
+                </div>
+                <div class="grid cols-2">
+                  <div>
+                    <label>Trigger</label>
+                    <select data-automation-trigger-type="${escapeHtml(deviceId)}" ${claimed ? "" : "disabled"}>
+                      <option value="input_event">input_event</option>
+                      <option value="button_hold">button_hold</option>
+                      <option value="device_online">device_online</option>
+                      <option value="device_offline">device_offline</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Input Index</label>
+                    <select data-automation-input-index="${escapeHtml(deviceId)}" ${claimed && buttonCount > 0 ? "" : "disabled"}>
+                      ${buttonOptions}
+                    </select>
+                  </div>
+                </div>
+                <div class="grid cols-2">
+                  <div>
+                    <label>Event</label>
+                    <select data-automation-event="${escapeHtml(deviceId)}" ${claimed ? "" : "disabled"}>
+                      <option value="press">press</option>
+                      <option value="release">release</option>
+                      <option value="hold">hold</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Hold Seconds (button_hold)</label>
+                    <input data-automation-hold-seconds="${escapeHtml(deviceId)}" type="number" min="1" max="600" value="2" ${claimed ? "" : "disabled"} />
+                  </div>
+                </div>
+                <div class="grid cols-2">
+                  <div>
+                    <label>Action Type</label>
+                    <select data-automation-action-type="${escapeHtml(deviceId)}" ${claimed ? "" : "disabled"}>
+                      <option value="set_relay">set_relay</option>
+                      <option value="set_all_relays">set_all_relays</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Relay Index (set_relay)</label>
+                    <select data-automation-relay-index="${escapeHtml(deviceId)}" ${claimed && relayCount > 0 ? "" : "disabled"}>
+                      ${relayOptions}
+                    </select>
+                  </div>
+                </div>
+                <div class="grid cols-2">
+                  <div>
+                    <label>Action</label>
+                    <select data-automation-action="${escapeHtml(deviceId)}" ${claimed ? "" : "disabled"}>
+                      <option value="on">on</option>
+                      <option value="off">off</option>
+                      <option value="toggle">toggle</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Cooldown Seconds</label>
+                    <input data-automation-cooldown="${escapeHtml(deviceId)}" type="number" min="0" max="86400" value="0" ${claimed ? "" : "disabled"} />
+                  </div>
+                </div>
+                <div class="grid cols-2">
+                  <div>
+                    <label>Condition Relay (optional)</label>
+                    <select data-automation-condition-relay="${escapeHtml(deviceId)}" ${claimed ? "" : "disabled"}>
+                      ${relayConditionOptions}
+                    </select>
+                  </div>
+                  <div>
+                    <label>Condition State</label>
+                    <select data-automation-condition-state="${escapeHtml(deviceId)}" ${claimed ? "" : "disabled"}>
+                      <option value="on">on</option>
+                      <option value="off">off</option>
+                    </select>
+                  </div>
+                </div>
+                <label class="io-inline-check">
+                  <input type="checkbox" data-automation-enabled="${escapeHtml(deviceId)}" checked ${claimed ? "" : "disabled"} />
+                  Enabled
+                </label>
+                <div class="device-action-row">
+                  <button data-create-automation="${escapeHtml(deviceId)}" ${claimed ? "" : "disabled"}>Create Automation</button>
+                </div>
+              </section>
+
+              <section class="automation-create-section">
+                <div class="meta"><strong>Create Time Schedule</strong></div>
+                <div>
+                  <label>Name (optional)</label>
+                  <input data-schedule-name="${escapeHtml(deviceId)}" placeholder="Example: Night OFF" />
+                </div>
+                <div class="grid cols-2">
+                  <div>
+                    <label>Schedule Type</label>
+                    <select data-schedule-type="${escapeHtml(deviceId)}" ${claimed ? "" : "disabled"}>
+                      <option value="once">once</option>
+                      <option value="cron">cron</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Timezone</label>
+                    <input data-schedule-timezone="${escapeHtml(deviceId)}" value="UTC" ${claimed ? "" : "disabled"} />
+                  </div>
+                </div>
+                <div class="grid cols-2">
+                  <div>
+                    <label>Once At</label>
+                    <input data-schedule-once-at="${escapeHtml(deviceId)}" type="datetime-local" value="${escapeHtml(onceLocalDefault)}" ${claimed ? "" : "disabled"} />
+                  </div>
+                  <div>
+                    <label>Cron Expression</label>
+                    <input data-schedule-cron="${escapeHtml(deviceId)}" value="*/5 * * * *" ${claimed ? "" : "disabled"} />
+                  </div>
+                </div>
+                <div class="grid cols-2">
+                  <div>
+                    <label>Target Scope</label>
+                    <select data-schedule-target-scope="${escapeHtml(deviceId)}" ${claimed ? "" : "disabled"}>
+                      <option value="single">single</option>
+                      <option value="all">all</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Relay Index (single)</label>
+                    <select data-schedule-relay-index="${escapeHtml(deviceId)}" ${claimed && relayCount > 0 ? "" : "disabled"}>
+                      ${relayOptions}
+                    </select>
+                  </div>
+                </div>
+                <div class="grid cols-2">
+                  <div>
+                    <label>Action</label>
+                    <select data-schedule-action="${escapeHtml(deviceId)}" ${claimed ? "" : "disabled"}>
+                      <option value="on">on</option>
+                      <option value="off">off</option>
+                      <option value="toggle">toggle</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="io-inline-check" style="margin-top: 22px;">
+                      <input type="checkbox" data-schedule-enabled="${escapeHtml(deviceId)}" checked ${claimed ? "" : "disabled"} />
+                      Enabled
+                    </label>
+                  </div>
+                </div>
+                <div class="device-action-row">
+                  <button data-create-schedule="${escapeHtml(deviceId)}" ${claimed ? "" : "disabled"}>Create Schedule</button>
+                </div>
+              </section>
+            </div>
             <div>
               <div class="meta"><strong>Automations</strong> (${testing.automations.length})</div>
               <div class="automation-test-list">${automationRows}</div>
@@ -2825,6 +3288,13 @@
       }).join("");
 
       $("devicesTable").innerHTML = `<div class="devices-list">${cards}</div>`;
+      if (isAdminUser()) {
+        for (const device of visibleDevices) {
+          if (device && typeof device.id === "string") {
+            syncAutomationTestingControls(device.id);
+          }
+        }
+      }
     }
 
     function renderSigningKeys(keys) {
@@ -3348,6 +3818,8 @@
       const loadAutomationTests = target.getAttribute("data-load-automation-tests");
       const runAutomationNow = target.getAttribute("data-run-automation-now");
       const runScheduleNow = target.getAttribute("data-run-schedule-now");
+      const createAutomation = target.getAttribute("data-create-automation");
+      const createSchedule = target.getAttribute("data-create-schedule");
 
       try {
         if (deviceCollapse) {
@@ -3367,6 +3839,58 @@
             log(
               `Automation testing loaded: ${loadAutomationTests} automations=${loaded.automations.length} schedules=${loaded.schedules.length}`
             );
+          });
+          return;
+        }
+
+        if (createAutomation) {
+          if (!isAdminUser()) {
+            throw new Error("forbidden: Insufficient role.");
+          }
+          const deviceId = createAutomation;
+          const device = state.devices.find((item) => item && item.id === deviceId);
+          if (!device || !device.owner_user_id) {
+            throw new Error("Device must be claimed before creating automation.");
+          }
+          const card = target.closest(".device-card");
+          if (!(card instanceof HTMLElement)) {
+            throw new Error("Device card context not found.");
+          }
+
+          await withDeviceActionLock(deviceId, async () => {
+            const payload = collectAutomationCreatePayload(device, card);
+            const out = await api(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}/automations`, {
+              method: "POST",
+              body: JSON.stringify(payload)
+            });
+            log(`Automation created: ${deviceId} id=${out.id} trigger=${out.trigger_type} action=${out.action_type}`);
+            await loadAutomationTesting(deviceId, { force: true });
+          });
+          return;
+        }
+
+        if (createSchedule) {
+          if (!isAdminUser()) {
+            throw new Error("forbidden: Insufficient role.");
+          }
+          const deviceId = createSchedule;
+          const device = state.devices.find((item) => item && item.id === deviceId);
+          if (!device || !device.owner_user_id) {
+            throw new Error("Device must be claimed before creating schedule.");
+          }
+          const card = target.closest(".device-card");
+          if (!(card instanceof HTMLElement)) {
+            throw new Error("Device card context not found.");
+          }
+
+          await withDeviceActionLock(deviceId, async () => {
+            const payload = collectScheduleCreatePayload(device, card);
+            const out = await api(`/api/v1/admin/devices/${encodeURIComponent(deviceId)}/schedules`, {
+              method: "POST",
+              body: JSON.stringify(payload)
+            });
+            log(`Schedule created: ${deviceId} id=${out.id} type=${out.schedule_type} action=${out.action}`);
+            await loadAutomationTesting(deviceId, { force: true });
           });
           return;
         }
@@ -3719,6 +4243,30 @@
       const connModeKey = target.getAttribute("data-conn-mode");
       if (connModeKey) {
         syncConnectivityControls(connModeKey);
+        return;
+      }
+
+      const automationTriggerKey = target.getAttribute("data-automation-trigger-type");
+      if (automationTriggerKey) {
+        syncAutomationTestingControls(automationTriggerKey);
+        return;
+      }
+
+      const automationActionKey = target.getAttribute("data-automation-action-type");
+      if (automationActionKey) {
+        syncAutomationTestingControls(automationActionKey);
+        return;
+      }
+
+      const scheduleTypeKey = target.getAttribute("data-schedule-type");
+      if (scheduleTypeKey) {
+        syncAutomationTestingControls(scheduleTypeKey);
+        return;
+      }
+
+      const scheduleScopeKey = target.getAttribute("data-schedule-target-scope");
+      if (scheduleScopeKey) {
+        syncAutomationTestingControls(scheduleScopeKey);
       }
     });
 

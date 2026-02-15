@@ -10,6 +10,12 @@ import { deviceFallbackSyncService } from "../../services/device-fallback-sync-s
 import { metricsService } from "../../services/metrics-service";
 import { opsBackupService } from "../../services/ops-backup-service";
 import { RelayServiceError, relayService } from "../../services/relay-service";
+import {
+  type ScheduleType,
+  computeNextExecution,
+  toIsoOrNull as toScheduleIsoOrNull,
+  validateCronExpression
+} from "../../services/schedule-utils";
 import { schedulerService } from "../../services/scheduler-service";
 import { newId, randomToken, sha256 } from "../../utils/crypto";
 import { deriveStableClaimCode } from "../../utils/claim-code";
@@ -234,6 +240,29 @@ const alertSimulationSchema = z.object({
   backup_failure_threshold: z.number().int().min(1).max(1_000_000).default(1)
 });
 
+const adminCreateAutomationSchema = z.object({
+  name: z.string().min(1).max(120),
+  trigger_type: z.enum(["input_event", "button_hold", "device_online", "device_offline"]),
+  trigger_config: z.record(z.unknown()).default({}),
+  condition_config: z.record(z.unknown()).default({}),
+  action_type: z.enum(["set_relay", "set_all_relays"]),
+  action_config: z.record(z.unknown()).default({}),
+  cooldown_seconds: z.number().int().min(0).max(86400).default(0),
+  is_enabled: z.boolean().default(true)
+});
+
+const adminCreateScheduleSchema = z.object({
+  target_scope: z.enum(["single", "all"]).default("single"),
+  relay_index: z.number().int().min(0).nullable().optional(),
+  name: z.string().min(1).max(120).nullable().optional(),
+  schedule_type: z.enum(["once", "cron"]),
+  cron_expression: z.string().min(1).max(120).nullable().optional(),
+  execute_at: z.string().datetime().nullable().optional(),
+  timezone: z.string().min(1).max(120).default("UTC"),
+  action: z.enum(["on", "off", "toggle"]),
+  is_enabled: z.boolean().default(true)
+});
+
 function toIso(value: Date | string | null): string | null {
   if (!value) {
     return null;
@@ -253,6 +282,177 @@ function asNullableObject(value: unknown): Record<string, unknown> | null {
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function parseNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function validateAutomationConfig(params: {
+  triggerType: "input_event" | "button_hold" | "device_online" | "device_offline";
+  triggerConfig: Record<string, unknown>;
+  actionType: "set_relay" | "set_all_relays";
+  actionConfig: Record<string, unknown>;
+  relayCount: number;
+  buttonCount: number;
+}): void {
+  if (params.triggerType === "input_event" || params.triggerType === "button_hold") {
+    const inputIndex = parseNumber(params.triggerConfig.input_index);
+    if (inputIndex !== null && (!Number.isInteger(inputIndex) || inputIndex < 0 || inputIndex >= params.buttonCount)) {
+      throw new Error("invalid_input_index");
+    }
+  }
+
+  if (params.triggerType === "button_hold") {
+    const holdSeconds = parseNumber(params.triggerConfig.hold_seconds);
+    if (holdSeconds === null || holdSeconds <= 0 || holdSeconds > 600) {
+      throw new Error("invalid_hold_seconds");
+    }
+  }
+
+  if (params.triggerType === "device_online" || params.triggerType === "device_offline") {
+    if (Object.keys(params.triggerConfig).length > 0) {
+      throw new Error("trigger_config_not_allowed");
+    }
+  }
+
+  if (params.actionType === "set_all_relays") {
+    if (params.actionConfig.action !== "on" && params.actionConfig.action !== "off") {
+      throw new Error("invalid_all_relays_action");
+    }
+    return;
+  }
+
+  const relayIndex = parseNumber(params.actionConfig.relay_index);
+  if (relayIndex === null || !Number.isInteger(relayIndex)) {
+    throw new Error("invalid_relay_index");
+  }
+  if (relayIndex < 0 || relayIndex >= params.relayCount) {
+    throw new Error("invalid_relay_index");
+  }
+  if (
+    params.actionConfig.action !== "on" &&
+    params.actionConfig.action !== "off" &&
+    params.actionConfig.action !== "toggle"
+  ) {
+    throw new Error("invalid_relay_action");
+  }
+}
+
+function normalizeAutomationError(error: Error): string {
+  switch (error.message) {
+    case "invalid_input_index":
+      return "trigger_config.input_index is out of device input range.";
+    case "invalid_hold_seconds":
+      return "trigger_config.hold_seconds must be between 1 and 600 for button_hold.";
+    case "trigger_config_not_allowed":
+      return "trigger_config must be empty for device_online/device_offline triggers.";
+    case "invalid_all_relays_action":
+      return "action_config.action must be on or off for set_all_relays.";
+    case "invalid_relay_index":
+      return "action_config.relay_index is out of device relay range.";
+    case "invalid_relay_action":
+      return "action_config.action must be on, off, or toggle for set_relay.";
+    default:
+      return "Automation configuration is invalid.";
+  }
+}
+
+function validateSchedulePayload(params: {
+  targetScope: "single" | "all";
+  relayIndex: number | null;
+  action: "on" | "off" | "toggle";
+  scheduleType: ScheduleType;
+  cronExpression: string | null;
+  executeAt: string | null;
+  timezone: string;
+  relayCount: number;
+}): { nextExecution: string | null } {
+  if (params.targetScope === "single") {
+    if (!Number.isInteger(params.relayIndex)) {
+      throw new Error("relay_index_required");
+    }
+    if ((params.relayIndex as number) < 0 || (params.relayIndex as number) >= params.relayCount) {
+      throw new Error("relay_index_out_of_range");
+    }
+  } else if (params.action === "toggle") {
+    throw new Error("invalid_action_for_all_scope");
+  }
+
+  if (params.scheduleType === "cron") {
+    validateCronExpression(params.cronExpression ?? "", params.timezone);
+  }
+
+  const next = computeNextExecution({
+    scheduleType: params.scheduleType,
+    cronExpression: params.cronExpression,
+    executeAt: params.executeAt,
+    timezone: params.timezone
+  });
+  const nextIso = toScheduleIsoOrNull(next);
+  if (!nextIso) {
+    throw new Error("schedule_in_past");
+  }
+  return { nextExecution: nextIso };
+}
+
+function normalizeScheduleError(error: Error): { code: string; message: string } {
+  switch (error.message) {
+    case "relay_index_required":
+      return {
+        code: "validation_error",
+        message: "relay_index is required for single target scope."
+      };
+    case "relay_index_out_of_range":
+      return {
+        code: "validation_error",
+        message: "relay_index is outside device relay range."
+      };
+    case "invalid_action_for_all_scope":
+      return {
+        code: "validation_error",
+        message: "All-relays schedules support on/off actions only."
+      };
+    case "invalid_timezone":
+      return {
+        code: "validation_error",
+        message: "timezone is invalid."
+      };
+    case "cron_expression_required":
+      return {
+        code: "validation_error",
+        message: "cron_expression is required for cron schedule."
+      };
+    case "execute_at_required":
+      return {
+        code: "validation_error",
+        message: "execute_at is required for once schedule."
+      };
+    case "invalid_execute_at":
+      return {
+        code: "validation_error",
+        message: "execute_at must be a valid timestamp."
+      };
+    case "schedule_in_past":
+      return {
+        code: "validation_error",
+        message: "Schedule next execution must be in the future."
+      };
+    default:
+      return {
+        code: "validation_error",
+        message: "Invalid schedule configuration."
+      };
+  }
 }
 
 function asRelayList(value: unknown): Array<{
@@ -629,13 +829,17 @@ async function getClaimedDevice(deviceId: string): Promise<{
   id: string;
   device_uid: string;
   owner_user_id: string;
+  relay_count: number;
+  button_count: number;
 } | null> {
   const result = await query<{
     id: string;
     device_uid: string;
     owner_user_id: string | null;
+    relay_count: number;
+    button_count: number;
   }>(
-    `SELECT id, device_uid, owner_user_id
+    `SELECT id, device_uid, owner_user_id, relay_count, button_count
      FROM devices
      WHERE id = $1
        AND is_active = TRUE
@@ -649,7 +853,9 @@ async function getClaimedDevice(deviceId: string): Promise<{
   return {
     id: row.id,
     device_uid: row.device_uid,
-    owner_user_id: row.owner_user_id
+    owner_user_id: row.owner_user_id,
+    relay_count: row.relay_count,
+    button_count: row.button_count
   };
 }
 
@@ -1037,6 +1243,68 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
     return reply.send(rules.rows.map((row) => serializeAutomation(row)));
   });
 
+  server.post("/devices/:id/automations", { preHandler: preHandlers }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const parsed = adminCreateAutomationSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return sendApiError(reply, 400, "validation_error", "Invalid request body.", parsed.error.flatten());
+    }
+
+    const device = await getClaimedDevice(params.id);
+    if (!device) {
+      return sendApiError(reply, 404, "not_found", "Claimed device not found.");
+    }
+
+    const body = parsed.data;
+    try {
+      validateAutomationConfig({
+        triggerType: body.trigger_type,
+        triggerConfig: body.trigger_config,
+        actionType: body.action_type,
+        actionConfig: body.action_config,
+        relayCount: device.relay_count,
+        buttonCount: device.button_count
+      });
+
+      const now = nowIso();
+      const inserted = await query<AdminAutomationRow>(
+        `INSERT INTO automation_rules (
+           id, user_id, device_id, name, trigger_type, trigger_config,
+           condition_config, action_type, action_config, cooldown_seconds,
+           is_enabled, definition_updated_at, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6::jsonb,
+           $7::jsonb, $8, $9::jsonb, $10,
+           $11, $12, $13, $14
+         )
+         RETURNING
+           id, user_id, device_id, name, trigger_type, trigger_config,
+           condition_config, action_type, action_config, cooldown_seconds,
+           is_enabled, last_triggered_at, definition_updated_at, created_at, updated_at`,
+        [
+          newId(),
+          device.owner_user_id,
+          device.id,
+          body.name.trim(),
+          body.trigger_type,
+          JSON.stringify(body.trigger_config),
+          JSON.stringify(body.condition_config),
+          body.action_type,
+          JSON.stringify(body.action_config),
+          body.cooldown_seconds,
+          body.is_enabled,
+          now,
+          now,
+          now
+        ]
+      );
+      void deviceFallbackSyncService.syncDeviceFallback(device.id).catch(() => undefined);
+      return reply.code(201).send(serializeAutomation(inserted.rows[0]));
+    } catch (error) {
+      return sendApiError(reply, 400, "validation_error", normalizeAutomationError(error as Error));
+    }
+  });
+
   server.get("/devices/:id/schedules", { preHandler: preHandlers }, async (request, reply) => {
     const params = request.params as { id: string };
     const device = await getClaimedDevice(params.id);
@@ -1057,6 +1325,74 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
       [device.id, device.owner_user_id]
     );
     return reply.send(schedules.rows.map((row) => serializeSchedule(row)));
+  });
+
+  server.post("/devices/:id/schedules", { preHandler: preHandlers }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const parsed = adminCreateScheduleSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return sendApiError(reply, 400, "validation_error", "Invalid request body.", parsed.error.flatten());
+    }
+
+    const device = await getClaimedDevice(params.id);
+    if (!device) {
+      return sendApiError(reply, 404, "not_found", "Claimed device not found.");
+    }
+
+    const body = parsed.data;
+    try {
+      const validation = validateSchedulePayload({
+        targetScope: body.target_scope,
+        relayIndex: body.target_scope === "single" ? body.relay_index ?? null : null,
+        action: body.action,
+        scheduleType: body.schedule_type,
+        cronExpression: body.cron_expression ?? null,
+        executeAt: body.execute_at ?? null,
+        timezone: body.timezone,
+        relayCount: device.relay_count
+      });
+
+      const now = nowIso();
+      const inserted = await query<AdminScheduleRow>(
+        `INSERT INTO schedules (
+           id, user_id, device_id, relay_index, target_scope, name,
+           schedule_type, cron_expression, execute_at, timezone, action,
+           is_enabled, next_execution, definition_updated_at, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6,
+           $7, $8, $9, $10, $11,
+           $12, $13, $14, $15, $16
+         )
+         RETURNING
+           id, user_id, device_id, relay_index, target_scope, name,
+           schedule_type, cron_expression, execute_at, timezone, action,
+           is_enabled, last_executed, next_execution, execution_count,
+           definition_updated_at, created_at, updated_at`,
+        [
+          newId(),
+          device.owner_user_id,
+          device.id,
+          body.target_scope === "single" ? body.relay_index ?? null : null,
+          body.target_scope,
+          body.name?.trim() ?? null,
+          body.schedule_type,
+          body.schedule_type === "cron" ? body.cron_expression?.trim() ?? null : null,
+          body.schedule_type === "once" ? body.execute_at ?? null : null,
+          body.timezone,
+          body.action,
+          body.is_enabled,
+          body.is_enabled ? validation.nextExecution : null,
+          now,
+          now,
+          now
+        ]
+      );
+      void deviceFallbackSyncService.syncDeviceFallback(device.id).catch(() => undefined);
+      return reply.code(201).send(serializeSchedule(inserted.rows[0]));
+    } catch (error) {
+      const normalized = normalizeScheduleError(error as Error);
+      return sendApiError(reply, 400, normalized.code, normalized.message);
+    }
   });
 
   server.post("/automations/:id/run-now", { preHandler: preHandlers }, async (request, reply) => {

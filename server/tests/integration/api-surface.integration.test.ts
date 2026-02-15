@@ -420,6 +420,50 @@ test("integration: API surface coverage for admin/user/webhook routes", async ()
     });
     assert.equal(claimAfterUserRelease.status, 200);
 
+    const adminCreateAutomation = await injectJson(app, {
+      method: "POST",
+      url: `/api/v1/admin/devices/${provisionDeviceId}/automations`,
+      headers: authHeaders(adminAccessToken),
+      payload: {
+        name: "Admin-created automation",
+        trigger_type: "input_event",
+        trigger_config: {
+          input_index: 0,
+          event: "press"
+        },
+        condition_config: {},
+        action_type: "set_relay",
+        action_config: {
+          relay_index: 0,
+          action: "toggle"
+        },
+        cooldown_seconds: 0,
+        is_enabled: true
+      }
+    });
+    assert.equal(adminCreateAutomation.status, 201);
+    const adminAutomationId = readString(adminCreateAutomation.body, "id");
+    assert.ok(adminAutomationId.length > 0);
+
+    const adminCreateSchedule = await injectJson(app, {
+      method: "POST",
+      url: `/api/v1/admin/devices/${provisionDeviceId}/schedules`,
+      headers: authHeaders(adminAccessToken),
+      payload: {
+        target_scope: "single",
+        relay_index: 1,
+        name: "Admin-created once",
+        schedule_type: "once",
+        execute_at: new Date(Date.now() + 300_000).toISOString(),
+        timezone: "UTC",
+        action: "off",
+        is_enabled: true
+      }
+    });
+    assert.equal(adminCreateSchedule.status, 201);
+    const adminScheduleId = readString(adminCreateSchedule.body, "id");
+    assert.ok(adminScheduleId.length > 0);
+
     const scheduleCreate = await injectJson(app, {
       method: "POST",
       url: "/api/v1/schedules",
