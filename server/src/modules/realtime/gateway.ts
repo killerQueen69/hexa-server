@@ -2088,7 +2088,9 @@ function handleDeviceSocket(
         await updateLastSeenAndFirmware(deviceId, req.socket.remoteAddress ?? "", reportedFirmwareVersion);
 
         const relays = Array.isArray(message.relays)
-          ? message.relays.filter((item): item is boolean => typeof item === "boolean")
+          ? message.relays
+              .map((item) => asBooleanLike(item))
+              .filter((item): item is boolean => item !== null)
           : [];
         if (relays.length === 0) {
           return;

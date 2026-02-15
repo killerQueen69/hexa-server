@@ -499,6 +499,39 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
       return relays.rows.length === 3 && relays.rows.every((row) => row.is_on === true);
     }, 10_000);
 
+    deviceWs.ws.send(
+      JSON.stringify({
+        type: "state_report",
+        relays: [1, 0, 1],
+        ts: nowIso()
+      })
+    );
+
+    const numericRelayState = await clientWs.waitForMessages((msg) => {
+      if (msg.type !== "device_state" || !Array.isArray(msg.relays)) {
+        return false;
+      }
+      const relays = msg.relays;
+      return relays.length === 3 && relays[0] === true && relays[1] === false && relays[2] === true;
+    });
+    assert.deepEqual(numericRelayState.relays, [true, false, true]);
+
+    await waitUntil(async () => {
+      const relays = await query<{ relay_index: number; is_on: boolean }>(
+        `SELECT relay_index, is_on
+         FROM relay_states
+         WHERE device_id = $1
+         ORDER BY relay_index ASC`,
+        [deviceId]
+      );
+      return (
+        relays.rows.length === 3 &&
+        relays.rows[0]?.is_on === true &&
+        relays.rows[1]?.is_on === false &&
+        relays.rows[2]?.is_on === true
+      );
+    }, 10_000);
+
     clientWs.ws.send(
       JSON.stringify({
         type: "cmd",
