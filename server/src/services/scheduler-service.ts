@@ -29,6 +29,18 @@ type DueScheduleRow = {
   next_execution: Date | string | null;
 };
 
+export type ScheduleRunStatus = "executed" | "failed" | "skipped";
+
+export type ScheduleRunResult = {
+  status: ScheduleRunStatus;
+  reason?: string;
+  code?: string;
+  message?: string;
+  action_result?: unknown;
+  next_execution?: string | null;
+  is_enabled?: boolean;
+};
+
 async function writeScheduleFailureAudit(params: {
   scheduleId: string;
   deviceId: string;
@@ -83,6 +95,56 @@ class SchedulerService {
     this.timer = null;
   }
 
+  async runNowById(scheduleId: string): Promise<{
+    schedule_id: string;
+    device_id: string;
+    status: ScheduleRunStatus;
+    reason?: string;
+    code?: string;
+    message?: string;
+    action_result?: unknown;
+    next_execution?: string | null;
+    is_enabled?: boolean;
+  } | null> {
+    const lookup = await query<DueScheduleRow>(
+      `SELECT
+         id, user_id, device_id, relay_index, target_scope, schedule_type,
+         cron_expression, execute_at, timezone, action, is_enabled, next_execution
+       FROM schedules
+       WHERE id = $1
+       LIMIT 1`,
+      [scheduleId]
+    );
+    const schedule = lookup.rows[0];
+    if (!schedule) {
+      return null;
+    }
+
+    if (!schedule.is_enabled) {
+      return {
+        schedule_id: schedule.id,
+        device_id: schedule.device_id,
+        status: "skipped",
+        reason: "schedule_disabled"
+      };
+    }
+
+    const outcome = await this.executeSchedule(schedule, {
+      forceFrom: new Date()
+    });
+    return {
+      schedule_id: schedule.id,
+      device_id: schedule.device_id,
+      status: outcome.status,
+      reason: outcome.reason,
+      code: outcome.code,
+      message: outcome.message,
+      action_result: outcome.action_result,
+      next_execution: outcome.next_execution,
+      is_enabled: outcome.is_enabled
+    };
+  }
+
   private async tick(): Promise<void> {
     if (this.tickInFlight) {
       return;
@@ -120,15 +182,25 @@ class SchedulerService {
     }
   }
 
-  private async executeSchedule(schedule: DueScheduleRow): Promise<void> {
+  private async executeSchedule(
+    schedule: DueScheduleRow,
+    options?: {
+      forceFrom?: Date;
+    }
+  ): Promise<ScheduleRunResult> {
     const now = nowIso();
-    const currentDueAt = schedule.next_execution
-      ? new Date(schedule.next_execution)
-      : new Date();
+    const currentDueAt = options?.forceFrom
+      ? options.forceFrom
+      : schedule.next_execution
+        ? new Date(schedule.next_execution)
+        : new Date();
     const from = Number.isNaN(currentDueAt.getTime()) ? new Date() : currentDueAt;
 
     let nextExecutionIso: string | null = null;
     let disableAfterRun = false;
+    let outcome: ScheduleRunResult = {
+      status: "executed"
+    };
 
     try {
       const next = computeNextExecution({
@@ -141,8 +213,10 @@ class SchedulerService {
 
       if (schedule.schedule_type === "once") {
         disableAfterRun = true;
+        nextExecutionIso = null;
+      } else {
+        nextExecutionIso = toIsoOrNull(next);
       }
-      nextExecutionIso = toIsoOrNull(next);
     } catch (error) {
       this.logger?.warn(
         {
@@ -157,7 +231,7 @@ class SchedulerService {
 
     try {
       if (schedule.target_scope === "all") {
-        await relayService.setAllRelays({
+        outcome.action_result = await relayService.setAllRelays({
           deviceId: schedule.device_id,
           action: schedule.action === "toggle" ? "off" : schedule.action,
           source: {
@@ -175,7 +249,7 @@ class SchedulerService {
           );
         }
 
-        await relayService.setRelay({
+        outcome.action_result = await relayService.setRelay({
           deviceId: schedule.device_id,
           relayIndex: schedule.relay_index as number,
           action: schedule.action,
@@ -207,6 +281,11 @@ class SchedulerService {
         },
         "schedule_execution_failed"
       );
+      outcome = {
+        status: "failed",
+        code,
+        message
+      };
     } finally {
       const isEnabled = disableAfterRun ? false : schedule.is_enabled;
       await query(
@@ -219,7 +298,11 @@ class SchedulerService {
          WHERE id = $4`,
         [now, nextExecutionIso, isEnabled, schedule.id]
       );
+      outcome.next_execution = nextExecutionIso;
+      outcome.is_enabled = isEnabled;
     }
+
+    return outcome;
   }
 }
 

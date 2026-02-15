@@ -3,6 +3,7 @@ import { z } from "zod";
 import { query } from "../../db/connection";
 import { authenticate } from "../../http/auth-guards";
 import { sendApiError } from "../../http/api-error";
+import { deviceFallbackSyncService } from "../../services/device-fallback-sync-service";
 import { newId } from "../../utils/crypto";
 import { nowIso } from "../../utils/time";
 
@@ -238,11 +239,11 @@ export async function automationRoutes(server: FastifyInstance): Promise<void> {
         `INSERT INTO automation_rules (
            id, user_id, device_id, name, trigger_type, trigger_config,
            condition_config, action_type, action_config, cooldown_seconds,
-           is_enabled, created_at, updated_at
+           is_enabled, definition_updated_at, created_at, updated_at
          ) VALUES (
            $1, $2, $3, $4, $5, $6::jsonb,
            $7::jsonb, $8, $9::jsonb, $10,
-           $11, $12, $13
+           $11, $12, $13, $14
          )
          RETURNING
            id, user_id, device_id, name, trigger_type, trigger_config,
@@ -261,10 +262,12 @@ export async function automationRoutes(server: FastifyInstance): Promise<void> {
           body.cooldown_seconds,
           body.is_enabled,
           now,
+          now,
           now
         ]
       );
 
+      void deviceFallbackSyncService.syncDeviceFallback(body.device_id).catch(() => undefined);
       return reply.code(201).send(serializeAutomation(inserted.rows[0]));
     } catch (error) {
       return sendApiError(reply, 400, "validation_error", normalizeError(error as Error));
@@ -350,9 +353,10 @@ export async function automationRoutes(server: FastifyInstance): Promise<void> {
              action_config = $6::jsonb,
              cooldown_seconds = $7,
              is_enabled = $8,
-             updated_at = $9
-         WHERE id = $10
-           AND user_id = $11
+             definition_updated_at = $9,
+             updated_at = $10
+         WHERE id = $11
+           AND user_id = $12
          RETURNING
            id, user_id, device_id, name, trigger_type, trigger_config,
            condition_config, action_type, action_config, cooldown_seconds,
@@ -367,11 +371,15 @@ export async function automationRoutes(server: FastifyInstance): Promise<void> {
           merged.cooldown_seconds,
           merged.is_enabled,
           nowIso(),
+          nowIso(),
           params.id,
           request.user.sub
         ]
       );
 
+      if (existing.device_id) {
+        void deviceFallbackSyncService.syncDeviceFallback(existing.device_id).catch(() => undefined);
+      }
       return reply.send(serializeAutomation(updated.rows[0]));
     } catch (error) {
       return sendApiError(reply, 400, "validation_error", normalizeError(error as Error));
@@ -383,6 +391,7 @@ export async function automationRoutes(server: FastifyInstance): Promise<void> {
     const updated = await query<AutomationRuleRow>(
       `UPDATE automation_rules
        SET is_enabled = TRUE,
+           definition_updated_at = $1,
            updated_at = $1
        WHERE id = $2
          AND user_id = $3
@@ -397,6 +406,9 @@ export async function automationRoutes(server: FastifyInstance): Promise<void> {
       return sendApiError(reply, 404, "not_found", "Automation not found.");
     }
 
+    if (updated.rows[0].device_id) {
+      void deviceFallbackSyncService.syncDeviceFallback(updated.rows[0].device_id).catch(() => undefined);
+    }
     return reply.send(serializeAutomation(updated.rows[0]));
   });
 
@@ -405,6 +417,7 @@ export async function automationRoutes(server: FastifyInstance): Promise<void> {
     const updated = await query<AutomationRuleRow>(
       `UPDATE automation_rules
        SET is_enabled = FALSE,
+           definition_updated_at = $1,
            updated_at = $1
        WHERE id = $2
          AND user_id = $3
@@ -419,15 +432,19 @@ export async function automationRoutes(server: FastifyInstance): Promise<void> {
       return sendApiError(reply, 404, "not_found", "Automation not found.");
     }
 
+    if (updated.rows[0].device_id) {
+      void deviceFallbackSyncService.syncDeviceFallback(updated.rows[0].device_id).catch(() => undefined);
+    }
     return reply.send(serializeAutomation(updated.rows[0]));
   });
 
   server.delete("/:id", { preHandler: [authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const deleted = await query(
+    const deleted = await query<{ device_id: string | null }>(
       `DELETE FROM automation_rules
        WHERE id = $1
-         AND user_id = $2`,
+         AND user_id = $2
+       RETURNING device_id`,
       [params.id, request.user.sub]
     );
 
@@ -435,6 +452,10 @@ export async function automationRoutes(server: FastifyInstance): Promise<void> {
       return sendApiError(reply, 404, "not_found", "Automation not found.");
     }
 
+    const deviceId = deleted.rows[0]?.device_id;
+    if (deviceId) {
+      void deviceFallbackSyncService.syncDeviceFallback(deviceId).catch(() => undefined);
+    }
     return reply.send({ ok: true });
   });
 }

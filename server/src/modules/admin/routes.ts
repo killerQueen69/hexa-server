@@ -5,9 +5,12 @@ import { query, withTransaction } from "../../db/connection";
 import { authenticate, requireRole } from "../../http/auth-guards";
 import { sendApiError } from "../../http/api-error";
 import { realtimeHub } from "../../realtime/hub";
+import { automationService } from "../../services/automation-service";
+import { deviceFallbackSyncService } from "../../services/device-fallback-sync-service";
 import { metricsService } from "../../services/metrics-service";
 import { opsBackupService } from "../../services/ops-backup-service";
 import { RelayServiceError, relayService } from "../../services/relay-service";
+import { schedulerService } from "../../services/scheduler-service";
 import { newId, randomToken, sha256 } from "../../utils/crypto";
 import { deriveStableClaimCode } from "../../utils/claim-code";
 import { nowIso } from "../../utils/time";
@@ -96,6 +99,45 @@ type AuditRow = {
   details: unknown;
   source: string | null;
   created_at: Date | string;
+};
+
+type AdminAutomationRow = {
+  id: string;
+  user_id: string;
+  device_id: string | null;
+  name: string;
+  trigger_type: string;
+  trigger_config: unknown;
+  condition_config: unknown;
+  action_type: string;
+  action_config: unknown;
+  cooldown_seconds: number;
+  is_enabled: boolean;
+  last_triggered_at: Date | string | null;
+  definition_updated_at: Date | string;
+  created_at: Date | string;
+  updated_at: Date | string;
+};
+
+type AdminScheduleRow = {
+  id: string;
+  user_id: string;
+  device_id: string;
+  relay_index: number | null;
+  target_scope: "single" | "all";
+  name: string | null;
+  schedule_type: "once" | "cron";
+  cron_expression: string | null;
+  execute_at: Date | string | null;
+  timezone: string;
+  action: "on" | "off" | "toggle";
+  is_enabled: boolean;
+  last_executed: Date | string | null;
+  next_execution: Date | string | null;
+  execution_count: number;
+  definition_updated_at: Date | string;
+  created_at: Date | string;
+  updated_at: Date | string;
 };
 
 type OverviewDeviceStats = {
@@ -338,6 +380,49 @@ function serializeAudit(row: AuditRow) {
   };
 }
 
+function serializeAutomation(row: AdminAutomationRow) {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    device_id: row.device_id,
+    name: row.name,
+    trigger_type: row.trigger_type,
+    trigger_config: asObject(row.trigger_config),
+    condition_config: asObject(row.condition_config),
+    action_type: row.action_type,
+    action_config: asObject(row.action_config),
+    cooldown_seconds: row.cooldown_seconds,
+    is_enabled: row.is_enabled,
+    last_triggered_at: toIso(row.last_triggered_at),
+    definition_updated_at: toIso(row.definition_updated_at),
+    created_at: toIso(row.created_at),
+    updated_at: toIso(row.updated_at)
+  };
+}
+
+function serializeSchedule(row: AdminScheduleRow) {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    device_id: row.device_id,
+    relay_index: row.relay_index,
+    target_scope: row.target_scope,
+    name: row.name,
+    schedule_type: row.schedule_type,
+    cron_expression: row.cron_expression,
+    execute_at: toIso(row.execute_at),
+    timezone: row.timezone,
+    action: row.action,
+    is_enabled: row.is_enabled,
+    last_executed: toIso(row.last_executed),
+    next_execution: toIso(row.next_execution),
+    execution_count: row.execution_count,
+    definition_updated_at: toIso(row.definition_updated_at),
+    created_at: toIso(row.created_at),
+    updated_at: toIso(row.updated_at)
+  };
+}
+
 function validateInputConfigMatrix(
   device: InputConfigValidationDevice,
   inputConfig: InputConfigRow[]
@@ -538,6 +623,34 @@ async function userExists(userId: string): Promise<boolean> {
     [userId]
   );
   return Boolean(result.rowCount && result.rowCount > 0);
+}
+
+async function getClaimedDevice(deviceId: string): Promise<{
+  id: string;
+  device_uid: string;
+  owner_user_id: string;
+} | null> {
+  const result = await query<{
+    id: string;
+    device_uid: string;
+    owner_user_id: string | null;
+  }>(
+    `SELECT id, device_uid, owner_user_id
+     FROM devices
+     WHERE id = $1
+       AND is_active = TRUE
+     LIMIT 1`,
+    [deviceId]
+  );
+  const row = result.rows[0];
+  if (!row || !row.owner_user_id) {
+    return null;
+  }
+  return {
+    id: row.id,
+    device_uid: row.device_uid,
+    owner_user_id: row.owner_user_id
+  };
 }
 
 async function adminUserCount(client?: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<{ total: string }> }> }): Promise<number> {
@@ -875,7 +988,7 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
 
       return {
         kind: "deleted" as const,
-        releasedDevices: releasedDevices.rowCount ?? 0
+        releasedDeviceIds: releasedDevices.rows.map((row) => row.id)
       };
     });
 
@@ -887,16 +1000,133 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
       return sendApiError(reply, 409, "last_admin", "Cannot delete the last admin user.");
     }
 
+    for (const deviceId of outcome.releasedDeviceIds) {
+      void deviceFallbackSyncService.syncDeviceFallback(deviceId).catch(() => undefined);
+    }
+
     return reply.send({
       ok: true,
       deleted_user_id: params.id,
-      released_devices: outcome.releasedDevices
+      released_devices: outcome.releasedDeviceIds.length
     });
   });
 
   server.get("/devices", { preHandler: preHandlers }, async (_request, reply) => {
     const rows = await listGlobalDevices();
     return reply.send(rows.map((row) => serializeDevice(row)));
+  });
+
+  server.get("/devices/:id/automations", { preHandler: preHandlers }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const device = await getClaimedDevice(params.id);
+    if (!device) {
+      return sendApiError(reply, 404, "not_found", "Claimed device not found.");
+    }
+
+    const rules = await query<AdminAutomationRow>(
+      `SELECT
+         id, user_id, device_id, name, trigger_type, trigger_config, condition_config,
+         action_type, action_config, cooldown_seconds, is_enabled, last_triggered_at,
+         definition_updated_at, created_at, updated_at
+       FROM automation_rules
+       WHERE device_id = $1
+         AND user_id = $2
+       ORDER BY definition_updated_at DESC, created_at DESC`,
+      [device.id, device.owner_user_id]
+    );
+    return reply.send(rules.rows.map((row) => serializeAutomation(row)));
+  });
+
+  server.get("/devices/:id/schedules", { preHandler: preHandlers }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const device = await getClaimedDevice(params.id);
+    if (!device) {
+      return sendApiError(reply, 404, "not_found", "Claimed device not found.");
+    }
+
+    const schedules = await query<AdminScheduleRow>(
+      `SELECT
+         id, user_id, device_id, relay_index, target_scope, name,
+         schedule_type, cron_expression, execute_at, timezone, action,
+         is_enabled, last_executed, next_execution, execution_count,
+         definition_updated_at, created_at, updated_at
+       FROM schedules
+       WHERE device_id = $1
+         AND user_id = $2
+       ORDER BY definition_updated_at DESC, created_at DESC`,
+      [device.id, device.owner_user_id]
+    );
+    return reply.send(schedules.rows.map((row) => serializeSchedule(row)));
+  });
+
+  server.post("/automations/:id/run-now", { preHandler: preHandlers }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const ownership = await query<{
+      id: string;
+      user_id: string;
+      device_id: string | null;
+      owner_user_id: string | null;
+    }>(
+      `SELECT ar.id, ar.user_id, ar.device_id, d.owner_user_id
+       FROM automation_rules ar
+       LEFT JOIN devices d ON d.id = ar.device_id
+       WHERE ar.id = $1
+       LIMIT 1`,
+      [params.id]
+    );
+    const row = ownership.rows[0];
+    if (!row || !row.device_id || !row.owner_user_id) {
+      return sendApiError(reply, 404, "not_found", "Automation for claimed device not found.");
+    }
+    if (row.user_id !== row.owner_user_id) {
+      return sendApiError(
+        reply,
+        409,
+        "ownership_mismatch",
+        "Automation does not belong to the current device owner."
+      );
+    }
+
+    const runResult = await automationService.runNowById(params.id);
+    if (!runResult) {
+      return sendApiError(reply, 404, "not_found", "Automation not found.");
+    }
+    return reply.send(runResult);
+  });
+
+  server.post("/schedules/:id/run-now", { preHandler: preHandlers }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const ownership = await query<{
+      id: string;
+      user_id: string;
+      device_id: string;
+      owner_user_id: string | null;
+    }>(
+      `SELECT s.id, s.user_id, s.device_id, d.owner_user_id
+       FROM schedules s
+       JOIN devices d ON d.id = s.device_id
+       WHERE s.id = $1
+       LIMIT 1`,
+      [params.id]
+    );
+    const row = ownership.rows[0];
+    if (!row || !row.owner_user_id) {
+      return sendApiError(reply, 404, "not_found", "Schedule for claimed device not found.");
+    }
+    if (row.user_id !== row.owner_user_id) {
+      return sendApiError(
+        reply,
+        409,
+        "ownership_mismatch",
+        "Schedule does not belong to the current device owner."
+      );
+    }
+
+    const runResult = await schedulerService.runNowById(params.id);
+    if (!runResult) {
+      return sendApiError(reply, 404, "not_found", "Schedule not found.");
+    }
+    return reply.send(runResult);
   });
 
   server.patch("/devices/:id", { preHandler: preHandlers }, async (request, reply) => {
@@ -1148,6 +1378,9 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
         connectivity: connectivityUpdate
       });
     }
+    if (typeof changes.owner_user_id !== "undefined") {
+      void deviceFallbackSyncService.syncDeviceFallback(updated.id).catch(() => undefined);
+    }
     return reply.send(serializeDevice(updated));
   });
 
@@ -1217,6 +1450,7 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
     if (!released) {
       return sendApiError(reply, 404, "not_found", "Device not found.");
     }
+    void deviceFallbackSyncService.syncDeviceFallback(params.id).catch(() => undefined);
     return reply.send({
       ok: true,
       claim_code: released

@@ -9,6 +9,7 @@ import { query } from "../../db/connection";
 import { realtimeHub } from "../../realtime/hub";
 import { automationService } from "../../services/automation-service";
 import { deviceStateCache } from "../../services/device-state-cache";
+import { deviceFallbackSyncService } from "../../services/device-fallback-sync-service";
 import { type OtaManifestPayload, verifyManifestSignature } from "../../services/ota-manifest-signer";
 import { RelayServiceError, relayService } from "../../services/relay-service";
 import { smartHomeService } from "../../services/smart-home-service";
@@ -2032,6 +2033,7 @@ function handleDeviceSocket(
     deviceSessionId = session.id;
 
     await updateLastSeen(row.id, req.socket.remoteAddress ?? "");
+    void deviceFallbackSyncService.syncDeviceFallback(row.id).catch(() => undefined);
 
     const ts = nowIso();
     void automationService

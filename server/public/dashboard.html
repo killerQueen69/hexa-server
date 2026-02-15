@@ -444,6 +444,39 @@
       gap: 8px;
     }
 
+    .automation-test-stack {
+      display: grid;
+      gap: 8px;
+    }
+
+    .automation-test-list {
+      display: grid;
+      gap: 6px;
+      max-height: 220px;
+      overflow: auto;
+    }
+
+    .automation-test-row {
+      display: grid;
+      gap: 6px;
+      border: 1px solid #e2e7da;
+      border-radius: 8px;
+      background: #f8faf5;
+      padding: 6px;
+    }
+
+    .automation-test-row-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .automation-test-row-meta {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
     .button-state-grid {
       display: grid;
       gap: 6px;
@@ -724,6 +757,7 @@
       collapsedDeviceCards: {},
       deviceSearchQuery: "",
       pendingDeviceActions: new Map(),
+      automationTestingByDevice: new Map(),
       pendingRealtimeCommands: new Map(),
       realtimeSocket: null,
       realtimeAuthed: false,
@@ -1295,6 +1329,201 @@
       return run;
     }
 
+    function getAutomationTestingState(deviceId) {
+      const key = String(deviceId || "").trim();
+      if (!key) {
+        return {
+          loading: false,
+          error: "",
+          loadedAt: "",
+          automations: [],
+          schedules: []
+        };
+      }
+
+      const cached = state.automationTestingByDevice.get(key);
+      if (!cached || typeof cached !== "object") {
+        return {
+          loading: false,
+          error: "",
+          loadedAt: "",
+          automations: [],
+          schedules: []
+        };
+      }
+      return {
+        loading: cached.loading === true,
+        error: typeof cached.error === "string" ? cached.error : "",
+        loadedAt: typeof cached.loadedAt === "string" ? cached.loadedAt : "",
+        automations: Array.isArray(cached.automations) ? cached.automations : [],
+        schedules: Array.isArray(cached.schedules) ? cached.schedules : []
+      };
+    }
+
+    function setAutomationTestingState(deviceId, next) {
+      const key = String(deviceId || "").trim();
+      if (!key) {
+        return;
+      }
+      const current = getAutomationTestingState(key);
+      state.automationTestingByDevice.set(key, {
+        ...current,
+        ...next
+      });
+    }
+
+    async function loadAutomationTesting(deviceId, options = {}) {
+      const key = String(deviceId || "").trim();
+      if (!key) {
+        return {
+          automations: [],
+          schedules: []
+        };
+      }
+
+      const device = (state.devices || []).find((entry) => entry && entry.id === key);
+      if (!device || !device.owner_user_id) {
+        setAutomationTestingState(key, {
+          loading: false,
+          error: device ? "Device is unclaimed." : "Device not found.",
+          loadedAt: "",
+          automations: [],
+          schedules: []
+        });
+        renderDevices(state.devices);
+        return {
+          automations: [],
+          schedules: []
+        };
+      }
+
+      const force = options && options.force === true;
+      const current = getAutomationTestingState(key);
+      if (!force && current.loadedAt && !current.error) {
+        return {
+          automations: current.automations,
+          schedules: current.schedules
+        };
+      }
+
+      setAutomationTestingState(key, {
+        loading: true,
+        error: ""
+      });
+      renderDevices(state.devices);
+
+      try {
+        const [automations, schedules] = await Promise.all([
+          api(`/api/v1/admin/devices/${encodeURIComponent(key)}/automations`, { method: "GET" }),
+          api(`/api/v1/admin/devices/${encodeURIComponent(key)}/schedules`, { method: "GET" })
+        ]);
+        const normalizedAutomations = Array.isArray(automations) ? automations : [];
+        const normalizedSchedules = Array.isArray(schedules) ? schedules : [];
+        setAutomationTestingState(key, {
+          loading: false,
+          error: "",
+          loadedAt: nowIso(),
+          automations: normalizedAutomations,
+          schedules: normalizedSchedules
+        });
+        renderDevices(state.devices);
+        return {
+          automations: normalizedAutomations,
+          schedules: normalizedSchedules
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "load_failed";
+        setAutomationTestingState(key, {
+          loading: false,
+          error: message
+        });
+        renderDevices(state.devices);
+        throw error;
+      }
+    }
+
+    function renderAutomationTesting(device) {
+      if (!isAdminUser()) {
+        return "";
+      }
+      const deviceId = String(device && device.id ? device.id : "");
+      if (!deviceId) {
+        return "";
+      }
+
+      const claimed = Boolean(device.owner_user_id);
+      const testing = getAutomationTestingState(deviceId);
+      const loadLabel = testing.loading ? "Loading..." : "Load Rules";
+      const loadDisabled = claimed ? (testing.loading ? "disabled" : "") : "disabled";
+      const loadedAtText = testing.loadedAt ? formatIsoWithOffset(testing.loadedAt) : "-";
+
+      const automationRows = testing.automations.length > 0
+        ? testing.automations.map((rule) => {
+            const id = String(rule && rule.id ? rule.id : "");
+            const name = String(rule && rule.name ? rule.name : "Unnamed automation");
+            const triggerType = String(rule && rule.trigger_type ? rule.trigger_type : "-");
+            const actionType = String(rule && rule.action_type ? rule.action_type : "-");
+            const enabled = rule && rule.is_enabled === false ? "disabled" : "enabled";
+            return `
+              <div class="automation-test-row">
+                <div class="automation-test-row-head">
+                  <div>
+                    <strong>${escapeHtml(name)}</strong>
+                    <div class="automation-test-row-meta code">${escapeHtml(id)}</div>
+                    <div class="automation-test-row-meta">${escapeHtml(triggerType)} -> ${escapeHtml(actionType)} (${escapeHtml(enabled)})</div>
+                  </div>
+                  <button data-run-automation-now="${escapeHtml(deviceId)}:${escapeHtml(id)}" ${claimed ? "" : "disabled"}>Run Automation Now</button>
+                </div>
+              </div>
+            `;
+          }).join("")
+        : '<div class="muted">No automations for this device owner.</div>';
+
+      const scheduleRows = testing.schedules.length > 0
+        ? testing.schedules.map((schedule) => {
+            const id = String(schedule && schedule.id ? schedule.id : "");
+            const name = String(schedule && schedule.name ? schedule.name : "Unnamed schedule");
+            const scheduleType = String(schedule && schedule.schedule_type ? schedule.schedule_type : "-");
+            const action = String(schedule && schedule.action ? schedule.action : "-");
+            const enabled = schedule && schedule.is_enabled === false ? "disabled" : "enabled";
+            return `
+              <div class="automation-test-row">
+                <div class="automation-test-row-head">
+                  <div>
+                    <strong>${escapeHtml(name)}</strong>
+                    <div class="automation-test-row-meta code">${escapeHtml(id)}</div>
+                    <div class="automation-test-row-meta">${escapeHtml(scheduleType)} -> ${escapeHtml(action)} (${escapeHtml(enabled)})</div>
+                  </div>
+                  <button data-run-schedule-now="${escapeHtml(deviceId)}:${escapeHtml(id)}" ${claimed ? "" : "disabled"}>Run Schedule Now</button>
+                </div>
+              </div>
+            `;
+          }).join("")
+        : '<div class="muted">No schedules for this device owner.</div>';
+
+      return `
+        <section class="device-block">
+          <div class="device-block-title">Automation Testing (Admin)</div>
+          <div class="automation-test-stack">
+            <div class="device-action-row">
+              <button data-load-automation-tests="${escapeHtml(deviceId)}" class="secondary" ${loadDisabled}>${escapeHtml(loadLabel)}</button>
+            </div>
+            <div class="meta">claimed: ${claimed ? "yes" : "no"} | loaded_at: ${escapeHtml(loadedAtText)}</div>
+            ${testing.error ? `<div class="meta" style="color: var(--danger);">${escapeHtml(testing.error)}</div>` : ""}
+            ${!claimed ? '<div class="muted">Run-now controls are available only for claimed devices.</div>' : ""}
+            <div>
+              <div class="meta"><strong>Automations</strong> (${testing.automations.length})</div>
+              <div class="automation-test-list">${automationRows}</div>
+            </div>
+            <div>
+              <div class="meta"><strong>Schedules</strong> (${testing.schedules.length})</div>
+              <div class="automation-test-list">${scheduleRows}</div>
+            </div>
+          </div>
+        </section>
+      `;
+    }
+
     function parseIsoMs(value) {
       if (typeof value !== "string" || !value.trim()) {
         return null;
@@ -1465,6 +1694,7 @@
       state.accessToken = "";
       state.refreshToken = "";
       state.preferences = null;
+      state.automationTestingByDevice.clear();
       persistSession();
     }
 
@@ -2546,6 +2776,8 @@
                   </div>
                 </section>
 
+                ${admin ? renderAutomationTesting(d) : ""}
+
                 <section class="device-block">
                   <div class="device-block-title">Device Actions</div>
                   <div class="device-action-row">
@@ -2694,9 +2926,13 @@
       const devices = await api(path, { method: "GET" });
 
       const previousStatesByUid = new Map();
+      const previousOwnerByDeviceId = new Map();
       for (const device of state.devices || []) {
         if (!device || typeof device.device_uid !== "string") {
           continue;
+        }
+        if (typeof device.id === "string") {
+          previousOwnerByDeviceId.set(device.id, typeof device.owner_user_id === "string" ? device.owner_user_id : "");
         }
         if (!device.button_states || typeof device.button_states !== "object" || Array.isArray(device.button_states)) {
           continue;
@@ -2713,6 +2949,23 @@
           device.button_states = { ...cachedStates };
         }
         initializeDeviceButtonStates(device);
+
+        const ownerUserId = typeof device.owner_user_id === "string" ? device.owner_user_id : "";
+        const previousOwnerUserId = previousOwnerByDeviceId.get(device.id) || "";
+        if (!ownerUserId || ownerUserId !== previousOwnerUserId) {
+          state.automationTestingByDevice.delete(device.id);
+        }
+      }
+
+      const knownDeviceIds = new Set(
+        devices
+          .map((device) => (device && typeof device.id === "string" ? device.id : ""))
+          .filter((id) => id.length > 0)
+      );
+      for (const cachedDeviceId of state.automationTestingByDevice.keys()) {
+        if (!knownDeviceIds.has(cachedDeviceId)) {
+          state.automationTestingByDevice.delete(cachedDeviceId);
+        }
       }
 
       state.devices = devices;
@@ -3092,6 +3345,9 @@
       const otaInstall = target.getAttribute("data-ota-install");
       const wifiSet = target.getAttribute("data-wifi-set");
       const wifiClear = target.getAttribute("data-wifi-clear");
+      const loadAutomationTests = target.getAttribute("data-load-automation-tests");
+      const runAutomationNow = target.getAttribute("data-run-automation-now");
+      const runScheduleNow = target.getAttribute("data-run-schedule-now");
 
       try {
         if (deviceCollapse) {
@@ -3099,6 +3355,91 @@
           state.collapsedDeviceCards[deviceCollapse] = nextCollapsed;
           persistCollapsedDeviceCards();
           renderDevices(state.devices);
+          return;
+        }
+
+        if (loadAutomationTests) {
+          if (!isAdminUser()) {
+            throw new Error("forbidden: Insufficient role.");
+          }
+          await withDeviceActionLock(loadAutomationTests, async () => {
+            const loaded = await loadAutomationTesting(loadAutomationTests, { force: true });
+            log(
+              `Automation testing loaded: ${loadAutomationTests} automations=${loaded.automations.length} schedules=${loaded.schedules.length}`
+            );
+          });
+          return;
+        }
+
+        if (runAutomationNow) {
+          if (!isAdminUser()) {
+            throw new Error("forbidden: Insufficient role.");
+          }
+          const split = runAutomationNow.split(":");
+          const deviceId = split[0] || "";
+          const automationId = split[1] || "";
+          if (!deviceId || !automationId) {
+            throw new Error("Invalid automation run-now payload.");
+          }
+
+          const device = state.devices.find((item) => item && item.id === deviceId);
+          if (!device || !device.owner_user_id) {
+            throw new Error("Device must be claimed before run-now.");
+          }
+
+          await withDeviceActionLock(deviceId, async () => {
+            const started = Date.now();
+            const out = await api(`/api/v1/admin/automations/${encodeURIComponent(automationId)}/run-now`, {
+              method: "POST",
+              body: "{}"
+            });
+            const latencyMs = Date.now() - started;
+            const status = typeof out.status === "string" ? out.status : "unknown";
+            const reason = typeof out.reason === "string" ? out.reason : "";
+            const code = typeof out.code === "string" ? out.code : "";
+            log(
+              `Automation run-now: device=${deviceId} automation=${automationId} status=${status} latency=${latencyMs}ms` +
+              `${reason ? ` reason=${reason}` : ""}${code ? ` code=${code}` : ""}`
+            );
+            await loadDevices();
+            await loadAutomationTesting(deviceId, { force: true });
+          });
+          return;
+        }
+
+        if (runScheduleNow) {
+          if (!isAdminUser()) {
+            throw new Error("forbidden: Insufficient role.");
+          }
+          const split = runScheduleNow.split(":");
+          const deviceId = split[0] || "";
+          const scheduleId = split[1] || "";
+          if (!deviceId || !scheduleId) {
+            throw new Error("Invalid schedule run-now payload.");
+          }
+
+          const device = state.devices.find((item) => item && item.id === deviceId);
+          if (!device || !device.owner_user_id) {
+            throw new Error("Device must be claimed before run-now.");
+          }
+
+          await withDeviceActionLock(deviceId, async () => {
+            const started = Date.now();
+            const out = await api(`/api/v1/admin/schedules/${encodeURIComponent(scheduleId)}/run-now`, {
+              method: "POST",
+              body: "{}"
+            });
+            const latencyMs = Date.now() - started;
+            const status = typeof out.status === "string" ? out.status : "unknown";
+            const reason = typeof out.reason === "string" ? out.reason : "";
+            const code = typeof out.code === "string" ? out.code : "";
+            log(
+              `Schedule run-now: device=${deviceId} schedule=${scheduleId} status=${status} latency=${latencyMs}ms` +
+              `${reason ? ` reason=${reason}` : ""}${code ? ` code=${code}` : ""}`
+            );
+            await loadDevices();
+            await loadAutomationTesting(deviceId, { force: true });
+          });
           return;
         }
 

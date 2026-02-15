@@ -5,6 +5,7 @@ import { authenticate, requireRole } from "../../http/auth-guards";
 import { sendApiError } from "../../http/api-error";
 import { realtimeHub } from "../../realtime/hub";
 import { automationService } from "../../services/automation-service";
+import { deviceFallbackSyncService } from "../../services/device-fallback-sync-service";
 import { RelayServiceError, relayService } from "../../services/relay-service";
 import { newId, randomClaimCode, randomToken, sha256 } from "../../utils/crypto";
 import { deriveStableClaimCode } from "../../utils/claim-code";
@@ -530,6 +531,7 @@ export async function deviceRoutes(server: FastifyInstance): Promise<void> {
       }
 
       await automationService.ensureDefaultHoldRule(request.user.sub, claimed.id);
+      void deviceFallbackSyncService.syncDeviceFallback(claimed.id).catch(() => undefined);
 
       return reply.send({
         ok: true,
@@ -594,6 +596,7 @@ export async function deviceRoutes(server: FastifyInstance): Promise<void> {
       return sendApiError(reply, 404, "not_found", "Owned device not found.");
     }
 
+    void deviceFallbackSyncService.syncDeviceFallback(params.id).catch(() => undefined);
     return reply.send({
       ok: true,
       claim_code: released.claim_code

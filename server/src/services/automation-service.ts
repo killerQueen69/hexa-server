@@ -20,6 +20,16 @@ type AutomationRuleRow = {
   device_uid: string;
 };
 
+export type AutomationRunStatus = "executed" | "skipped" | "failed";
+
+export type AutomationRunResult = {
+  status: AutomationRunStatus;
+  reason?: string;
+  code?: string;
+  message?: string;
+  action_result?: unknown;
+};
+
 type RelayStateConditionRow = {
   is_on: boolean;
 };
@@ -222,6 +232,120 @@ class AutomationService {
     await this.dispatchEvent(event, logger);
   }
 
+  async runNowById(automationId: string): Promise<{
+    automation_id: string;
+    device_id: string | null;
+    device_uid: string;
+    status: AutomationRunStatus;
+    reason?: string;
+    code?: string;
+    message?: string;
+    action_result?: unknown;
+  } | null> {
+    const lookup = await query<AutomationRuleRow>(
+      `SELECT
+         ar.id,
+         ar.user_id,
+         ar.device_id,
+         ar.name,
+         ar.trigger_type,
+         ar.trigger_config,
+         ar.condition_config,
+         ar.action_type,
+         ar.action_config,
+         ar.cooldown_seconds,
+         ar.is_enabled,
+         ar.last_triggered_at,
+         d.device_uid
+       FROM automation_rules ar
+       JOIN devices d ON d.id = ar.device_id
+       WHERE ar.id = $1
+       LIMIT 1`,
+      [automationId]
+    );
+    const rule = lookup.rows[0];
+    if (!rule) {
+      return null;
+    }
+
+    if (!rule.is_enabled) {
+      return {
+        automation_id: rule.id,
+        device_id: rule.device_id,
+        device_uid: rule.device_uid,
+        status: "skipped",
+        reason: "automation_disabled"
+      };
+    }
+
+    const now = nowIso();
+    const triggerConfig = asRecord(rule.trigger_config);
+    let event: AutomationEvent;
+    if (rule.trigger_type === "input_event" || rule.trigger_type === "button_hold") {
+      const holdSeconds = parseNumber(triggerConfig.hold_seconds);
+      const minimumDurationMs = parseNumber(triggerConfig.minimum_duration_ms);
+      const durationFromHold =
+        holdSeconds !== null && holdSeconds > 0 ? Math.floor(holdSeconds * 1000) : null;
+      const durationMs = Math.max(
+        durationFromHold ?? 0,
+        minimumDurationMs !== null ? Math.floor(minimumDurationMs) : 0
+      );
+
+      event = {
+        type: "input_event",
+        deviceUid: rule.device_uid,
+        input_index: parseNumber(triggerConfig.input_index) ?? undefined,
+        input_type: typeof triggerConfig.input_type === "string" ? triggerConfig.input_type : "push_button",
+        event:
+          typeof triggerConfig.event === "string"
+            ? triggerConfig.event
+            : rule.trigger_type === "button_hold"
+              ? "hold"
+              : "press",
+        duration_ms: durationMs > 0 ? durationMs : undefined,
+        ts: now,
+        raw: {
+          type: "input_event",
+          ts: now,
+          synthetic: true
+        }
+      };
+    } else if (rule.trigger_type === "device_online" || rule.trigger_type === "device_offline") {
+      event = {
+        type: rule.trigger_type,
+        deviceUid: rule.device_uid,
+        ts: now,
+        raw: {
+          type: rule.trigger_type,
+          ts: now,
+          synthetic: true
+        }
+      };
+    } else {
+      return {
+        automation_id: rule.id,
+        device_id: rule.device_id,
+        device_uid: rule.device_uid,
+        status: "skipped",
+        reason: "unsupported_trigger_for_run_now"
+      };
+    }
+
+    const outcome = await this.processRule(rule, event, undefined, {
+      skipDedupe: true
+    });
+    return {
+      automation_id: rule.id,
+      device_id: rule.device_id,
+      device_uid: rule.device_uid,
+      status: outcome.status,
+      reason: outcome.reason,
+      code: outcome.code,
+      message: outcome.message,
+      action_result: outcome.action_result
+    };
+  }
+
   private async dispatchEvent(event: AutomationEvent, logger?: LoggerLike): Promise<void> {
     const rows = await query<AutomationRuleRow>(
       `SELECT
@@ -254,24 +378,39 @@ class AutomationService {
   private async processRule(
     rule: AutomationRuleRow,
     event: AutomationEvent,
-    logger?: LoggerLike
-  ): Promise<void> {
+    logger?: LoggerLike,
+    options?: {
+      skipDedupe?: boolean;
+    }
+  ): Promise<AutomationRunResult> {
     if (!rule.device_id) {
-      return;
+      return {
+        status: "skipped",
+        reason: "device_not_attached"
+      };
     }
     if (!this.matchesTrigger(rule, event)) {
-      return;
+      return {
+        status: "skipped",
+        reason: "trigger_mismatch"
+      };
     }
     if (!(await this.matchesCondition(rule, event))) {
-      return;
+      return {
+        status: "skipped",
+        reason: "condition_not_met"
+      };
     }
 
     const nowMs = Date.now();
     const dedupeKey = eventKey(rule.id, event);
-    if (dedupeKey) {
+    if (!options?.skipDedupe && dedupeKey) {
       const seenAt = this.recentEvents.get(dedupeKey);
       if (typeof seenAt === "number" && nowMs - seenAt < this.dedupeWindowMs) {
-        return;
+        return {
+          status: "skipped",
+          reason: "dedupe_window"
+        };
       }
       this.recentEvents.set(dedupeKey, nowMs);
       this.pruneDedupe(nowMs);
@@ -282,13 +421,16 @@ class AutomationService {
       if (!Number.isNaN(lastTriggered)) {
         const cooldownMs = Math.max(0, rule.cooldown_seconds) * 1000;
         if (nowMs - lastTriggered < cooldownMs) {
-          return;
+          return {
+            status: "skipped",
+            reason: "cooldown_active"
+          };
         }
       }
     }
 
     try {
-      await this.executeAction(rule, event);
+      const actionResult = await this.executeAction(rule, event);
       const now = nowIso();
       await query(
         `UPDATE automation_rules
@@ -305,6 +447,10 @@ class AutomationService {
         device_uid: event.deviceUid,
         ts: now
       });
+      return {
+        status: "executed",
+        action_result: actionResult
+      };
     } catch (error) {
       const code = error instanceof RelayServiceError ? error.code : "automation_execution_failed";
       const message = error instanceof Error ? error.message : "Automation execution failed.";
@@ -324,6 +470,11 @@ class AutomationService {
         },
         "automation_rule_execution_failed"
       );
+      return {
+        status: "failed",
+        code,
+        message
+      };
     }
   }
 
@@ -433,9 +584,9 @@ class AutomationService {
     return row.is_on === relayState.is_on;
   }
 
-  private async executeAction(rule: AutomationRuleRow, _event: AutomationEvent): Promise<void> {
+  private async executeAction(rule: AutomationRuleRow, _event: AutomationEvent): Promise<unknown> {
     if (!rule.device_id) {
-      return;
+      return null;
     }
     const action = asRecord(rule.action_config);
 
@@ -443,7 +594,7 @@ class AutomationService {
       if (action.action !== "on" && action.action !== "off") {
         throw new Error("invalid_automation_action");
       }
-      await relayService.setAllRelays({
+      return await relayService.setAllRelays({
         deviceId: rule.device_id,
         action: action.action,
         source: {
@@ -452,7 +603,6 @@ class AutomationService {
           automationId: rule.id
         }
       });
-      return;
     }
 
     if (rule.action_type === "set_relay") {
@@ -464,7 +614,7 @@ class AutomationService {
         throw new Error("invalid_automation_action");
       }
 
-      await relayService.setRelay({
+      return await relayService.setRelay({
         deviceId: rule.device_id,
         relayIndex,
         action: action.action,
@@ -474,7 +624,6 @@ class AutomationService {
           automationId: rule.id
         }
       });
-      return;
     }
 
     throw new Error("unsupported_automation_action");

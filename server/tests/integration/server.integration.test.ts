@@ -23,6 +23,7 @@ type ConnectedDevice = {
   ws: WebSocket;
   relays: boolean[];
   receivedConfigUpdates: JsonObject[];
+  receivedAutomationSyncs: JsonObject[];
   commandCount: number;
   waitForMessages: (predicate: (msg: JsonObject) => boolean, timeoutMs?: number) => Promise<JsonObject>;
 };
@@ -67,6 +68,14 @@ async function requestJson(
   };
 }
 
+function automationSyncRules(message: JsonObject): JsonObject[] {
+  const value = message.automations;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry) => Boolean(entry) && typeof entry === "object") as JsonObject[];
+}
+
 async function connectDeviceWs(
   wsBase: string,
   deviceUid: string,
@@ -77,6 +86,7 @@ async function connectDeviceWs(
 ): Promise<ConnectedDevice> {
   const relays = [false, false, false];
   const receivedConfigUpdates: JsonObject[] = [];
+  const receivedAutomationSyncs: JsonObject[] = [];
   const inboundMessages: JsonObject[] = [];
   let commandCount = 0;
   const ackMode = options?.ackMode ?? "normal";
@@ -203,6 +213,22 @@ async function connectDeviceWs(
       return;
     }
 
+    if (parsed.type === "sync_automations") {
+      receivedAutomationSyncs.push(parsed);
+      const commandId = typeof parsed.command_id === "string" ? parsed.command_id : "";
+      if (commandId && ackMode !== "drop_ack_keep_state" && ackMode !== "drop_ack_no_state") {
+        ws.send(
+          JSON.stringify({
+            type: "ack",
+            command_id: commandId,
+            ok: true,
+            ts: nowIso()
+          })
+        );
+      }
+      return;
+    }
+
     if (parsed.type === "device_control") {
       if (ackMode === "disconnect_on_command") {
         ws.close(1011, "intentional_disconnect_before_ack");
@@ -270,6 +296,7 @@ async function connectDeviceWs(
     ws,
     relays,
     receivedConfigUpdates,
+    receivedAutomationSyncs,
     get commandCount() {
       return commandCount;
     },
@@ -410,6 +437,12 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
 
     deviceWs = await connectDeviceWs(wsBase, deviceUid, deviceToken);
     clientWs = await connectClientWs(wsBase, accessToken);
+
+    const initialFallbackSync = await deviceWs.waitForMessages(
+      (msg) => msg.type === "sync_automations",
+      7_000
+    );
+    assert.ok(Array.isArray(initialFallbackSync.automations));
 
     await waitUntil(async () => {
       const row = await query<{ last_seen_at: Date | null }>(
@@ -764,6 +797,14 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
     const scheduleOnId = String(createdOn.body.id);
 
     await waitUntil(async () => {
+      return Boolean(
+        deviceWs?.receivedAutomationSyncs.some((msg) =>
+          automationSyncRules(msg).some((rule) => rule.source_id === scheduleOnId)
+        )
+      );
+    }, 7_000);
+
+    await waitUntil(async () => {
       const relays = await query<{ relay_index: number; is_on: boolean }>(
         `SELECT relay_index, is_on
          FROM relay_states
@@ -842,6 +883,14 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
     });
     assert.equal(automation.status, 201);
     const automationId = String(automation.body.id);
+
+    await waitUntil(async () => {
+      return Boolean(
+        deviceWs?.receivedAutomationSyncs.some((msg) =>
+          automationSyncRules(msg).some((rule) => rule.source_id === automationId)
+        )
+      );
+    }, 7_000);
 
     const turnOnAll = await requestJson(`${httpBase}/api/v1/devices/${deviceId}/relays/all`, {
       method: "POST",
@@ -1510,6 +1559,22 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
     assert.ok(
       /hexa_command_latency_ms_count\{source="api",scope="single"\}\s+[1-9]\d*/.test(metricsText)
     );
+
+    const syncCountBeforeRelease = deviceWs.receivedAutomationSyncs.length;
+    const releaseMainDevice = await requestJson(`${httpBase}/api/v1/devices/${deviceId}/release`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`
+      }
+    });
+    assert.equal(releaseMainDevice.status, 200);
+    await waitUntil(async () => {
+      if (!deviceWs || deviceWs.receivedAutomationSyncs.length <= syncCountBeforeRelease) {
+        return false;
+      }
+      const nextMessages = deviceWs.receivedAutomationSyncs.slice(syncCountBeforeRelease);
+      return nextMessages.some((msg) => automationSyncRules(msg).length === 0);
+    }, 7_000);
   } finally {
     if (deviceWs?.ws.readyState === WebSocket.OPEN) {
       deviceWs.ws.close(1000, "test_done");

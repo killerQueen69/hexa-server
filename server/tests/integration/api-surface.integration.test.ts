@@ -87,6 +87,18 @@ async function injectJson(
 
 test("integration: API surface coverage for admin/user/webhook routes", async () => {
   await runMigrations();
+  const fallbackMetadataColumns = await query<{ table_name: string; column_name: string }>(
+    `SELECT table_name, column_name
+     FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND (
+         (table_name = 'automation_rules' AND column_name = 'definition_updated_at')
+         OR
+         (table_name = 'schedules' AND column_name = 'definition_updated_at')
+       )`
+  );
+  assert.equal(fallbackMetadataColumns.rows.length, 2);
+
   const app = buildApp();
 
   try {
@@ -425,6 +437,50 @@ test("integration: API surface coverage for admin/user/webhook routes", async ()
     });
     assert.equal(scheduleCreate.status, 201);
     const scheduleId = readString(scheduleCreate.body, "id");
+    const scheduleDefinition = await query<{ definition_updated_at: Date | null }>(
+      `SELECT definition_updated_at
+       FROM schedules
+       WHERE id = $1
+       LIMIT 1`,
+      [scheduleId]
+    );
+    assert.equal(Boolean(scheduleDefinition.rows[0]?.definition_updated_at), true);
+
+    const adminDeviceSchedules = await injectJson(app, {
+      method: "GET",
+      url: `/api/v1/admin/devices/${provisionDeviceId}/schedules`,
+      headers: authHeaders(adminAccessToken)
+    });
+    assert.equal(adminDeviceSchedules.status, 200);
+    assert.equal(
+      asArray(adminDeviceSchedules.body).some((row) => asRecord(row).id === scheduleId),
+      true
+    );
+
+    const adminRunScheduleNow = await injectJson(app, {
+      method: "POST",
+      url: `/api/v1/admin/schedules/${scheduleId}/run-now`,
+      headers: authHeaders(adminAccessToken),
+      payload: {}
+    });
+    assert.equal(adminRunScheduleNow.status, 200);
+    assert.equal(readString(adminRunScheduleNow.body, "schedule_id"), scheduleId);
+    assert.equal(readString(adminRunScheduleNow.body, "status").length > 0, true);
+
+    const scheduleMetadataAfterRunNow = await query<{
+      last_executed: Date | null;
+      execution_count: number;
+      is_enabled: boolean;
+    }>(
+      `SELECT last_executed, execution_count, is_enabled
+       FROM schedules
+       WHERE id = $1
+       LIMIT 1`,
+      [scheduleId]
+    );
+    assert.equal(scheduleMetadataAfterRunNow.rows[0]?.execution_count, 1);
+    assert.equal(Boolean(scheduleMetadataAfterRunNow.rows[0]?.last_executed), true);
+    assert.equal(scheduleMetadataAfterRunNow.rows[0]?.is_enabled, false);
 
     const scheduleList = await injectJson(app, {
       method: "GET",
@@ -473,7 +529,12 @@ test("integration: API surface coverage for admin/user/webhook routes", async ()
         name: "Surface automation",
         trigger_type: "device_online",
         trigger_config: {},
-        condition_config: {},
+        condition_config: {
+          required_relay_state: {
+            relay_index: 0,
+            is_on: true
+          }
+        },
         action_type: "set_all_relays",
         action_config: { action: "off" },
         cooldown_seconds: 0,
@@ -482,6 +543,36 @@ test("integration: API surface coverage for admin/user/webhook routes", async ()
     });
     assert.equal(automationCreate.status, 201);
     const automationId = readString(automationCreate.body, "id");
+    const automationDefinition = await query<{ definition_updated_at: Date | null }>(
+      `SELECT definition_updated_at
+       FROM automation_rules
+       WHERE id = $1
+       LIMIT 1`,
+      [automationId]
+    );
+    assert.equal(Boolean(automationDefinition.rows[0]?.definition_updated_at), true);
+
+    const adminDeviceAutomations = await injectJson(app, {
+      method: "GET",
+      url: `/api/v1/admin/devices/${provisionDeviceId}/automations`,
+      headers: authHeaders(adminAccessToken)
+    });
+    assert.equal(adminDeviceAutomations.status, 200);
+    assert.equal(
+      asArray(adminDeviceAutomations.body).some((row) => asRecord(row).id === automationId),
+      true
+    );
+
+    const adminRunAutomationNow = await injectJson(app, {
+      method: "POST",
+      url: `/api/v1/admin/automations/${automationId}/run-now`,
+      headers: authHeaders(adminAccessToken),
+      payload: {}
+    });
+    assert.equal(adminRunAutomationNow.status, 200);
+    assert.equal(readString(adminRunAutomationNow.body, "automation_id"), automationId);
+    assert.equal(readString(adminRunAutomationNow.body, "status"), "skipped");
+    assert.equal(readString(adminRunAutomationNow.body, "reason"), "condition_not_met");
 
     const automationList = await injectJson(app, {
       method: "GET",

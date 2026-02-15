@@ -3,6 +3,7 @@ import { z } from "zod";
 import { query } from "../../db/connection";
 import { authenticate } from "../../http/auth-guards";
 import { sendApiError } from "../../http/api-error";
+import { deviceFallbackSyncService } from "../../services/device-fallback-sync-service";
 import {
   ScheduleType,
   computeNextExecution,
@@ -250,11 +251,11 @@ export async function scheduleRoutes(server: FastifyInstance): Promise<void> {
         `INSERT INTO schedules (
            id, user_id, device_id, relay_index, target_scope, name,
            schedule_type, cron_expression, execute_at, timezone, action,
-           is_enabled, next_execution, created_at, updated_at
+           is_enabled, next_execution, definition_updated_at, created_at, updated_at
          ) VALUES (
            $1, $2, $3, $4, $5, $6,
            $7, $8, $9, $10, $11,
-           $12, $13, $14, $15
+           $12, $13, $14, $15, $16
          )
          RETURNING
            id, user_id, device_id, relay_index, target_scope, name,
@@ -276,10 +277,12 @@ export async function scheduleRoutes(server: FastifyInstance): Promise<void> {
           body.is_enabled,
           body.is_enabled ? validation.nextExecution : null,
           now,
+          now,
           now
         ]
       );
 
+      void deviceFallbackSyncService.syncDeviceFallback(body.device_id).catch(() => undefined);
       return reply.code(201).send(serializeSchedule(inserted.rows[0]));
     } catch (error) {
       const normalized = normalizeError(error as Error);
@@ -370,9 +373,10 @@ export async function scheduleRoutes(server: FastifyInstance): Promise<void> {
              action = $8,
              is_enabled = $9,
              next_execution = $10,
-             updated_at = $11
-         WHERE id = $12
-           AND user_id = $13
+             definition_updated_at = $11,
+             updated_at = $12
+         WHERE id = $13
+           AND user_id = $14
          RETURNING
            id, user_id, device_id, relay_index, target_scope, name,
            schedule_type, cron_expression, execute_at, timezone, action,
@@ -390,11 +394,13 @@ export async function scheduleRoutes(server: FastifyInstance): Promise<void> {
           merged.is_enabled,
           merged.is_enabled ? validation.nextExecution : null,
           now,
+          now,
           params.id,
           request.user.sub
         ]
       );
 
+      void deviceFallbackSyncService.syncDeviceFallback(existing.device_id).catch(() => undefined);
       return reply.send(serializeSchedule(updated.rows[0]));
     } catch (error) {
       const normalized = normalizeError(error as Error);
@@ -438,6 +444,7 @@ export async function scheduleRoutes(server: FastifyInstance): Promise<void> {
         `UPDATE schedules
          SET is_enabled = TRUE,
              next_execution = $1,
+             definition_updated_at = $2,
              updated_at = $2
          WHERE id = $3
            AND user_id = $4
@@ -448,6 +455,7 @@ export async function scheduleRoutes(server: FastifyInstance): Promise<void> {
            created_at, updated_at`,
         [nextIso, now, params.id, request.user.sub]
       );
+      void deviceFallbackSyncService.syncDeviceFallback(row.device_id).catch(() => undefined);
       return reply.send(serializeSchedule(updated.rows[0]));
     } catch (error) {
       const normalized = normalizeError(error as Error);
@@ -461,6 +469,7 @@ export async function scheduleRoutes(server: FastifyInstance): Promise<void> {
       `UPDATE schedules
        SET is_enabled = FALSE,
            next_execution = NULL,
+           definition_updated_at = $1,
            updated_at = $1
        WHERE id = $2
          AND user_id = $3
@@ -476,15 +485,17 @@ export async function scheduleRoutes(server: FastifyInstance): Promise<void> {
       return sendApiError(reply, 404, "not_found", "Schedule not found.");
     }
 
+    void deviceFallbackSyncService.syncDeviceFallback(updated.rows[0].device_id).catch(() => undefined);
     return reply.send(serializeSchedule(updated.rows[0]));
   });
 
   server.delete("/:id", { preHandler: [authenticate] }, async (request, reply) => {
     const params = request.params as { id: string };
-    const deleted = await query(
+    const deleted = await query<{ device_id: string }>(
       `DELETE FROM schedules
        WHERE id = $1
-         AND user_id = $2`,
+         AND user_id = $2
+       RETURNING device_id`,
       [params.id, request.user.sub]
     );
 
@@ -492,6 +503,7 @@ export async function scheduleRoutes(server: FastifyInstance): Promise<void> {
       return sendApiError(reply, 404, "not_found", "Schedule not found.");
     }
 
+    void deviceFallbackSyncService.syncDeviceFallback(deleted.rows[0].device_id).catch(() => undefined);
     return reply.send({ ok: true });
   });
 }
