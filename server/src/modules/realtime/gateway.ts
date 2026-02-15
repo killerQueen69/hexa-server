@@ -48,11 +48,71 @@ type ClientOtaCommand = {
   channel?: OtaChannel;
 };
 
+type ButtonMode = "push_button" | "rocker_switch" | "rocker_switch_follow";
+
+type ClientButtonModeCommand = {
+  scope: "button_mode";
+  buttonIndex: number;
+  mode: ButtonMode;
+};
+
+type ClientButtonLinkCommand = {
+  scope: "button_link";
+  buttonIndex: number;
+  linked: boolean;
+};
+
+type ClientHaConfigCommand = {
+  scope: "ha_config";
+  showConfig: boolean;
+};
+
+type ConnectivityMode = "cloud_ws" | "local_mqtt";
+
+type ClientConnectivityModeCommand = {
+  scope: "connectivity_mode";
+  mode: ConnectivityMode;
+};
+
 type ClientCommand =
   | ClientRelayCommand
   | ClientWifiCommand
   | ClientDeviceControlCommand
-  | ClientOtaCommand;
+  | ClientOtaCommand
+  | ClientButtonModeCommand
+  | ClientButtonLinkCommand
+  | ClientHaConfigCommand
+  | ClientConnectivityModeCommand;
+
+type ClientConfigCommand =
+  | ClientButtonModeCommand
+  | ClientButtonLinkCommand
+  | ClientHaConfigCommand
+  | ClientConnectivityModeCommand;
+
+type InputConfigRow = {
+  input_index: number;
+  input_type: "push_button" | "rocker_switch";
+  linked: boolean;
+  target_relay_index: number | null;
+  rocker_mode: "edge_toggle" | "follow_position" | null;
+  invert_input: boolean;
+  hold_seconds: number | null;
+};
+
+type ConnectivityUpdatePayload = {
+  mode?: ConnectivityMode;
+  mqtt?: {
+    enabled?: boolean;
+    host?: string;
+    port?: number;
+    username?: string;
+    password?: string;
+    discovery_prefix?: string;
+    base_topic?: string;
+    show_config?: boolean;
+  };
+};
 
 type DeviceOtaLookupRow = {
   id: string;
@@ -88,6 +148,16 @@ type OtaResolvedRelease = {
     next_verification_key_id: string | null;
   };
   artifactPath: string;
+};
+
+type DeviceConfigLookupRow = {
+  id: string;
+  device_uid: string;
+  is_active: boolean;
+  relay_count: number;
+  button_count: number;
+  input_config: unknown;
+  config: unknown;
 };
 
 type RawWebSocket = {
@@ -244,6 +314,242 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function asBooleanLike(value: unknown): boolean | null {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (value === 1) {
+      return true;
+    }
+    if (value === 0) {
+      return false;
+    }
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "on" || normalized === "1") {
+      return true;
+    }
+    if (normalized === "false" || normalized === "off" || normalized === "0") {
+      return false;
+    }
+  }
+  return null;
+}
+
+function parseButtonMode(raw: unknown): ButtonMode | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (
+    normalized === "push_button" ||
+    normalized === "rocker_switch" ||
+    normalized === "rocker_switch_follow"
+  ) {
+    return normalized;
+  }
+  return null;
+}
+
+function parseConnectivityMode(raw: unknown): ConnectivityMode | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "cloud_ws" || normalized === "cloud" || normalized === "app") {
+    return "cloud_ws";
+  }
+  if (normalized === "local_mqtt" || normalized === "ha" || normalized === "mqtt") {
+    return "local_mqtt";
+  }
+  return null;
+}
+
+function defaultInputConfigRows(buttonCount: number, relayCount: number): InputConfigRow[] {
+  const out: InputConfigRow[] = [];
+  for (let i = 0; i < buttonCount; i += 1) {
+    const linked = relayCount > 0 && i < relayCount;
+    out.push({
+      input_index: i,
+      input_type: "push_button",
+      linked,
+      target_relay_index: linked ? i : null,
+      rocker_mode: null,
+      invert_input: false,
+      hold_seconds: null
+    });
+  }
+  return out;
+}
+
+function parseInputConfigRow(raw: unknown): InputConfigRow | null {
+  const row = asRecord(raw);
+  if (!row) {
+    return null;
+  }
+  const inputIndex = typeof row.input_index === "number" ? row.input_index : Number.NaN;
+  const inputTypeRaw = typeof row.input_type === "string" ? row.input_type.trim().toLowerCase() : "";
+  const linked = typeof row.linked === "boolean" ? row.linked : false;
+  const targetRelayIndex =
+    row.target_relay_index === null
+      ? null
+      : typeof row.target_relay_index === "number"
+        ? row.target_relay_index
+        : Number.NaN;
+  const rockerMode =
+    row.rocker_mode === null
+      ? null
+      : row.rocker_mode === "edge_toggle" || row.rocker_mode === "follow_position"
+        ? row.rocker_mode
+        : null;
+  const invertInput = typeof row.invert_input === "boolean" ? row.invert_input : false;
+  const holdSeconds =
+    row.hold_seconds === null
+      ? null
+      : typeof row.hold_seconds === "number" && Number.isInteger(row.hold_seconds)
+        ? row.hold_seconds
+        : null;
+
+  if (!Number.isInteger(inputIndex) || inputIndex < 0) {
+    return null;
+  }
+  if (inputTypeRaw !== "push_button" && inputTypeRaw !== "rocker_switch") {
+    return null;
+  }
+
+  return {
+    input_index: inputIndex,
+    input_type: inputTypeRaw,
+    linked,
+    target_relay_index: targetRelayIndex,
+    rocker_mode: rockerMode,
+    invert_input: invertInput,
+    hold_seconds: holdSeconds
+  };
+}
+
+function normalizeInputConfigRows(value: unknown, buttonCount: number, relayCount: number): InputConfigRow[] {
+  if (!Array.isArray(value)) {
+    return defaultInputConfigRows(buttonCount, relayCount);
+  }
+
+  const parsedRows: InputConfigRow[] = [];
+  for (const raw of value) {
+    const parsed = parseInputConfigRow(raw);
+    if (!parsed) {
+      return defaultInputConfigRows(buttonCount, relayCount);
+    }
+    parsedRows.push(parsed);
+  }
+
+  if (parsedRows.length !== buttonCount) {
+    return defaultInputConfigRows(buttonCount, relayCount);
+  }
+
+  try {
+    return validateInputConfigMatrix({
+      buttonCount,
+      relayCount
+    }, parsedRows);
+  } catch {
+    return defaultInputConfigRows(buttonCount, relayCount);
+  }
+}
+
+function validateInputConfigMatrix(
+  shape: { buttonCount: number; relayCount: number },
+  inputConfig: InputConfigRow[]
+): InputConfigRow[] {
+  if (inputConfig.length !== shape.buttonCount) {
+    throw new Error("input_config_size_mismatch");
+  }
+
+  const seen = new Set<number>();
+  for (const cfg of inputConfig) {
+    if (cfg.input_index >= shape.buttonCount) {
+      throw new Error("input_index_out_of_range");
+    }
+
+    if (seen.has(cfg.input_index)) {
+      throw new Error("duplicate_input_index");
+    }
+    seen.add(cfg.input_index);
+
+    if (cfg.linked) {
+      if (!Number.isInteger(cfg.target_relay_index)) {
+        throw new Error("target_relay_required");
+      }
+      if (
+        (cfg.target_relay_index as number) < 0 ||
+        (cfg.target_relay_index as number) >= shape.relayCount
+      ) {
+        throw new Error("target_relay_out_of_range");
+      }
+    } else if (cfg.target_relay_index !== null) {
+      throw new Error("target_relay_not_allowed");
+    }
+
+    if (cfg.input_type === "push_button") {
+      if (cfg.rocker_mode !== null) {
+        throw new Error("rocker_mode_not_allowed");
+      }
+    } else {
+      if (cfg.rocker_mode === null) {
+        throw new Error("rocker_mode_required");
+      }
+      if (cfg.hold_seconds !== null) {
+        throw new Error("hold_seconds_not_allowed");
+      }
+    }
+  }
+
+  for (let i = 0; i < shape.buttonCount; i += 1) {
+    if (!seen.has(i)) {
+      throw new Error("missing_input_index");
+    }
+  }
+
+  return [...inputConfig].sort((a, b) => a.input_index - b.input_index);
+}
+
+function normalizeInputConfigError(error: Error): string {
+  switch (error.message) {
+    case "input_config_size_mismatch":
+      return "input_config length must match device button_count.";
+    case "input_index_out_of_range":
+      return "input_index is outside device button range.";
+    case "duplicate_input_index":
+      return "input_index values must be unique.";
+    case "missing_input_index":
+      return "input_config must include every input index from 0..button_count-1.";
+    case "target_relay_required":
+      return "target_relay_index is required when linked is true.";
+    case "target_relay_out_of_range":
+      return "target_relay_index is outside relay range.";
+    case "target_relay_not_allowed":
+      return "target_relay_index must be null when linked is false.";
+    case "rocker_mode_not_allowed":
+      return "rocker_mode must be null for push_button input_type.";
+    case "rocker_mode_required":
+      return "rocker_mode is required for rocker_switch input_type.";
+    case "hold_seconds_not_allowed":
+      return "hold_seconds must be null for rocker_switch input_type.";
+    default:
+      return "Invalid input_config matrix.";
+  }
+}
+
+function cloneConfig(value: unknown): Record<string, unknown> {
+  const record = asRecord(value) ?? {};
+  try {
+    return JSON.parse(JSON.stringify(record)) as Record<string, unknown>;
+  } catch {
+    return { ...record };
+  }
 }
 
 function asNonNegativeInt(value: number | string): number {
@@ -841,8 +1147,338 @@ async function sendWifiConfigCommand(params: {
       details: {
         command_id: commandId
       }
+      };
+  }
+}
+
+async function loadDeviceForConfigCommand(params: {
+  userId: string;
+  role: string;
+  deviceId: string;
+}): Promise<
+  | { ok: true; row: DeviceConfigLookupRow }
+  | {
+      ok: false;
+      code: string;
+      message: string;
+    }
+> {
+  const isAdminActor = params.role === "admin";
+  const lookup = isAdminActor
+    ? await query<DeviceConfigLookupRow>(
+        `SELECT
+           id, device_uid, is_active, relay_count, button_count, input_config, config
+         FROM devices
+         WHERE id = $1
+         LIMIT 1`,
+        [params.deviceId]
+      )
+    : await query<DeviceConfigLookupRow>(
+        `SELECT
+           id, device_uid, is_active, relay_count, button_count, input_config, config
+         FROM devices
+         WHERE id = $1
+           AND owner_user_id = $2
+         LIMIT 1`,
+        [params.deviceId, params.userId]
+      );
+  const row = lookup.rows[0];
+  if (!row) {
+    return isAdminActor
+      ? {
+          ok: false,
+          code: "not_found",
+          message: "Device not found."
+        }
+      : {
+          ok: false,
+          code: "forbidden",
+          message: "Only the device owner can control this device."
+        };
+  }
+  if (!row.is_active) {
+    return {
+      ok: false,
+      code: "device_inactive",
+      message: "Device is inactive."
     };
   }
+  return {
+    ok: true,
+    row
+  };
+}
+
+async function sendConfigUpdateWithAck(params: {
+  deviceUid: string;
+  timeoutMs: number;
+  payload: {
+    io_config?: InputConfigRow[];
+    connectivity?: ConnectivityUpdatePayload;
+  };
+}): Promise<
+  | { ok: true; commandId: string; latencyMs: number }
+  | { ok: false; code: string; message: string; details?: Record<string, unknown> }
+> {
+  const commandId = newId();
+  const pendingAck = realtimeHub.createPendingAck(commandId, params.deviceUid, params.timeoutMs);
+  const sent = realtimeHub.sendToDevice(params.deviceUid, {
+    type: "config_update",
+    command_id: commandId,
+    ...params.payload,
+    ts: nowIso()
+  });
+  if (!sent) {
+    realtimeHub.resolveAck(commandId, {
+      ok: false,
+      error: "device_disconnected"
+    });
+    return {
+      ok: false,
+      code: "device_offline",
+      message: "Device is offline."
+    };
+  }
+
+  try {
+    const ack = await pendingAck;
+    if (!ack.ok) {
+      const errorCode =
+        typeof ack.error === "string" && ack.error.trim().length > 0
+          ? ack.error.trim()
+          : "device_rejected";
+      return {
+        ok: false,
+        code: errorCode,
+        message: "Device rejected configuration update.",
+        details: {
+          command_id: commandId
+        }
+      };
+    }
+    return {
+      ok: true,
+      commandId,
+      latencyMs: ack.latencyMs
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message === "ack_timeout") {
+      return {
+        ok: false,
+        code: "device_unreachable",
+        message: "Timed out waiting for device acknowledgement.",
+        details: {
+          command_id: commandId,
+          timeout_ms: params.timeoutMs
+        }
+      };
+    }
+    if (error instanceof Error && error.message === "device_disconnected") {
+      return {
+        ok: false,
+        code: "device_offline",
+        message: "Device disconnected before acknowledgement.",
+        details: {
+          command_id: commandId
+        }
+      };
+    }
+    return {
+      ok: false,
+      code: "device_ack_failed",
+      message: "Device acknowledgement failed.",
+      details: {
+        command_id: commandId
+      }
+    };
+  }
+}
+
+async function sendDeviceConfigCommand(params: {
+  userId: string;
+  role: string;
+  deviceId: string;
+  command: ClientConfigCommand;
+  timeoutMs: number;
+}): Promise<
+  | {
+      ok: true;
+      deviceUid: string;
+      latencyMs: number;
+      commandId: string;
+      inputConfig?: InputConfigRow[];
+      config?: Record<string, unknown>;
+    }
+  | {
+      ok: false;
+      code: string;
+      message: string;
+      details?: Record<string, unknown>;
+    }
+> {
+  const loaded = await loadDeviceForConfigCommand(params);
+  if (!loaded.ok) {
+    return loaded;
+  }
+  const row = loaded.row;
+
+  let nextInputConfig: InputConfigRow[] | undefined;
+  let nextConfig: Record<string, unknown> | undefined;
+  let outboundPayload: {
+    io_config?: InputConfigRow[];
+    connectivity?: ConnectivityUpdatePayload;
+  } = {};
+
+  if (params.command.scope === "button_mode") {
+    const current = normalizeInputConfigRows(row.input_config, row.button_count, row.relay_count);
+    const currentRow = current[params.command.buttonIndex];
+    if (!currentRow) {
+      return {
+        ok: false,
+        code: "validation_error",
+        message: "button_index is outside device button range."
+      };
+    }
+
+    const mode = params.command.mode;
+    currentRow.input_type = mode === "push_button" ? "push_button" : "rocker_switch";
+    if (mode === "push_button") {
+      currentRow.rocker_mode = null;
+    } else if (mode === "rocker_switch_follow") {
+      currentRow.rocker_mode = "follow_position";
+      currentRow.hold_seconds = null;
+    } else {
+      currentRow.rocker_mode = "edge_toggle";
+      currentRow.hold_seconds = null;
+    }
+
+    if (currentRow.linked) {
+      if (!Number.isInteger(currentRow.target_relay_index)) {
+        currentRow.target_relay_index =
+          row.relay_count > 0 ? Math.min(params.command.buttonIndex, row.relay_count - 1) : null;
+      }
+    }
+
+    try {
+      nextInputConfig = validateInputConfigMatrix(
+        {
+          buttonCount: row.button_count,
+          relayCount: row.relay_count
+        },
+        current
+      );
+    } catch (error) {
+      return {
+        ok: false,
+        code: "validation_error",
+        message: normalizeInputConfigError(error as Error)
+      };
+    }
+    outboundPayload = {
+      io_config: nextInputConfig
+    };
+  } else if (params.command.scope === "button_link") {
+    const current = normalizeInputConfigRows(row.input_config, row.button_count, row.relay_count);
+    const currentRow = current[params.command.buttonIndex];
+    if (!currentRow) {
+      return {
+        ok: false,
+        code: "validation_error",
+        message: "button_index is outside device button range."
+      };
+    }
+
+    currentRow.linked = params.command.linked;
+    if (!params.command.linked) {
+      currentRow.target_relay_index = null;
+    } else if (!Number.isInteger(currentRow.target_relay_index)) {
+      currentRow.target_relay_index =
+        row.relay_count > 0 ? Math.min(params.command.buttonIndex, row.relay_count - 1) : null;
+    }
+
+    try {
+      nextInputConfig = validateInputConfigMatrix(
+        {
+          buttonCount: row.button_count,
+          relayCount: row.relay_count
+        },
+        current
+      );
+    } catch (error) {
+      return {
+        ok: false,
+        code: "validation_error",
+        message: normalizeInputConfigError(error as Error)
+      };
+    }
+    outboundPayload = {
+      io_config: nextInputConfig
+    };
+  } else if (params.command.scope === "ha_config") {
+    nextConfig = cloneConfig(row.config);
+    const connectivity = asRecord(nextConfig.connectivity) ?? {};
+    const mqtt = asRecord(connectivity.mqtt) ?? {};
+    mqtt.show_config = params.command.showConfig;
+    connectivity.mqtt = mqtt;
+    nextConfig.connectivity = connectivity;
+    outboundPayload = {
+      connectivity: {
+        mqtt: {
+          show_config: params.command.showConfig
+        }
+      }
+    };
+  } else {
+    nextConfig = cloneConfig(row.config);
+    const connectivity = asRecord(nextConfig.connectivity) ?? {};
+    connectivity.mode = params.command.mode;
+    nextConfig.connectivity = connectivity;
+    outboundPayload = {
+      connectivity: {
+        mode: params.command.mode
+      }
+    };
+  }
+
+  const ackResult = await sendConfigUpdateWithAck({
+    deviceUid: row.device_uid,
+    timeoutMs: params.timeoutMs,
+    payload: outboundPayload
+  });
+  if (!ackResult.ok) {
+    return ackResult;
+  }
+
+  const updates: string[] = [];
+  const values: unknown[] = [];
+  if (nextInputConfig) {
+    values.push(JSON.stringify(nextInputConfig));
+    updates.push(`input_config = $${values.length}::jsonb`);
+  }
+  if (nextConfig) {
+    values.push(JSON.stringify(nextConfig));
+    updates.push(`config = $${values.length}::jsonb`);
+  }
+  values.push(nowIso());
+  updates.push(`updated_at = $${values.length}`);
+  values.push(row.id);
+  const idPos = values.length;
+
+  await query(
+    `UPDATE devices
+     SET ${updates.join(", ")}
+     WHERE id = $${idPos}`,
+    values
+  );
+
+  return {
+    ok: true,
+    deviceUid: row.device_uid,
+    latencyMs: ackResult.latencyMs,
+    commandId: ackResult.commandId,
+    inputConfig: nextInputConfig,
+    config: nextConfig
+  };
 }
 
 async function sendDeviceControlCommand(params: {
@@ -1809,6 +2445,123 @@ function handleClientSocket(
           reboot
         };
       }
+    } else if (scope === "button_mode") {
+      const buttonIndex =
+        typeof message.button_index === "number"
+          ? message.button_index
+          : typeof message.input_index === "number"
+            ? message.input_index
+            : Number.NaN;
+      if (!Number.isInteger(buttonIndex) || buttonIndex < 0) {
+        sendJson(socket, {
+          type: "cmd_ack",
+          ok: false,
+          code: "validation_error",
+          message: "button_index must be a non-negative integer.",
+          request_id: requestId
+        });
+        return;
+      }
+      const modeRaw =
+        (typeof message.mode === "string" ? message.mode : null) ??
+        (typeof message.action === "string" ? message.action : null) ??
+        "";
+      const mode = parseButtonMode(modeRaw);
+      if (!mode) {
+        sendJson(socket, {
+          type: "cmd_ack",
+          ok: false,
+          code: "validation_error",
+          message: "mode must be one of: push_button, rocker_switch, rocker_switch_follow.",
+          request_id: requestId
+        });
+        return;
+      }
+      command = {
+        scope: "button_mode",
+        buttonIndex,
+        mode
+      };
+    } else if (scope === "button_link") {
+      const buttonIndex =
+        typeof message.button_index === "number"
+          ? message.button_index
+          : typeof message.input_index === "number"
+            ? message.input_index
+            : Number.NaN;
+      if (!Number.isInteger(buttonIndex) || buttonIndex < 0) {
+        sendJson(socket, {
+          type: "cmd_ack",
+          ok: false,
+          code: "validation_error",
+          message: "button_index must be a non-negative integer.",
+          request_id: requestId
+        });
+        return;
+      }
+      const linked =
+        asBooleanLike(message.linked) ??
+        asBooleanLike(message.state) ??
+        asBooleanLike(message.action);
+      if (linked === null) {
+        sendJson(socket, {
+          type: "cmd_ack",
+          ok: false,
+          code: "validation_error",
+          message: "linked must be a boolean or on/off value.",
+          request_id: requestId
+        });
+        return;
+      }
+      command = {
+        scope: "button_link",
+        buttonIndex,
+        linked
+      };
+    } else if (scope === "ha_config") {
+      const showConfig =
+        asBooleanLike(message.show_config) ??
+        asBooleanLike(message.showConfig) ??
+        asBooleanLike(message.state) ??
+        asBooleanLike(message.action);
+      if (showConfig === null) {
+        sendJson(socket, {
+          type: "cmd_ack",
+          ok: false,
+          code: "validation_error",
+          message: "show_config must be a boolean or on/off value.",
+          request_id: requestId
+        });
+        return;
+      }
+      command = {
+        scope: "ha_config",
+        showConfig
+      };
+    } else if (scope === "connectivity_mode") {
+      const modeFromField = parseConnectivityMode(message.mode);
+      const modeFromAction = (() => {
+        const boolAction = asBooleanLike(message.action);
+        if (boolAction === null) {
+          return null;
+        }
+        return boolAction ? "cloud_ws" : "local_mqtt";
+      })();
+      const mode = modeFromField ?? modeFromAction;
+      if (!mode) {
+        sendJson(socket, {
+          type: "cmd_ack",
+          ok: false,
+          code: "validation_error",
+          message: "mode must be cloud_ws|local_mqtt or action on/off.",
+          request_id: requestId
+        });
+        return;
+      }
+      command = {
+        scope: "connectivity_mode",
+        mode
+      };
     } else if (scope === "ota") {
       const operationRaw =
         (typeof message.operation === "string" ? message.operation : null) ??
@@ -2040,6 +2793,58 @@ function handleClientSocket(
               latency_ms: otaControlResult.latencyMs,
               update_available: otaControlResult.updateAvailable,
               transfer_id: otaControlResult.transferId ?? null
+            }
+          });
+          return;
+        }
+
+        if (
+          command.scope === "button_mode" ||
+          command.scope === "button_link" ||
+          command.scope === "ha_config" ||
+          command.scope === "connectivity_mode"
+        ) {
+          const configCommandResult = await sendDeviceConfigCommand({
+            userId: actorUserId,
+            role: actorRole,
+            deviceId,
+            command,
+            timeoutMs: timeoutMs ?? WIFI_CONFIG_COMMAND_TIMEOUT_MS
+          });
+          if (!configCommandResult.ok) {
+            sendJson(socket, {
+              type: "cmd_ack",
+              ok: false,
+              code: configCommandResult.code,
+              message: configCommandResult.message,
+              details: configCommandResult.details ?? null,
+              request_id: requestId
+            });
+            return;
+          }
+
+          sendJson(socket, {
+            type: "cmd_ack",
+            ok: true,
+            request_id: requestId,
+            result: {
+              device_id: deviceId,
+              device_uid: configCommandResult.deviceUid,
+              scope: command.scope,
+              command_id: configCommandResult.commandId,
+              latency_ms: configCommandResult.latencyMs,
+              button_index:
+                command.scope === "button_mode" || command.scope === "button_link"
+                  ? command.buttonIndex
+                  : null,
+              mode:
+                command.scope === "button_mode"
+                  ? command.mode
+                  : command.scope === "connectivity_mode"
+                    ? command.mode
+                    : null,
+              linked: command.scope === "button_link" ? command.linked : null,
+              show_config: command.scope === "ha_config" ? command.showConfig : null
             }
           });
           return;

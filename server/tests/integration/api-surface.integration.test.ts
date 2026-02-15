@@ -348,6 +348,30 @@ test("integration: API surface coverage for admin/user/webhook routes", async ()
     });
     assert.equal(userPatchDevice.status, 200);
 
+    const userPatchDeviceConnectivity = await injectJson(app, {
+      method: "PATCH",
+      url: `/api/v1/devices/${provisionDeviceId}`,
+      headers: authHeaders(userAccessToken),
+      payload: {
+        config: {
+          connectivity: {
+            mqtt: {
+              enabled: true,
+              host: "mqtt.example.test",
+              port: 1883,
+              show_config: true
+            }
+          }
+        }
+      }
+    });
+    assert.equal(userPatchDeviceConnectivity.status, 200);
+    const patchedConnectivityDevice = asRecord(userPatchDeviceConnectivity.body);
+    const patchedConnectivityConfig = asRecord(patchedConnectivityDevice.config);
+    const patchedConnectivityNode = asRecord(patchedConnectivityConfig.connectivity);
+    const patchedConnectivityMqtt = asRecord(patchedConnectivityNode.mqtt);
+    assert.equal(patchedConnectivityMqtt.show_config, true);
+
     const userRotateToken = await injectJson(app, {
       method: "POST",
       url: `/api/v1/devices/${provisionDeviceId}/token/rotate`,

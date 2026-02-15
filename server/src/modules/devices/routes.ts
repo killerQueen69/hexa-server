@@ -54,6 +54,7 @@ type ConnectivityUpdatePayload = {
     password?: string;
     discovery_prefix?: string;
     base_topic?: string;
+    show_config?: boolean;
   };
 };
 
@@ -403,6 +404,11 @@ function extractConnectivityUpdate(configValue: unknown): ConnectivityUpdatePayl
     }
     if (typeof mqttSource.base_topic === "string") {
       mqtt.base_topic = mqttSource.base_topic;
+    }
+    if (typeof mqttSource.show_config === "boolean") {
+      mqtt.show_config = mqttSource.show_config;
+    } else if (typeof mqttSource.showConfig === "boolean") {
+      mqtt.show_config = mqttSource.showConfig;
     }
 
     if (Object.keys(mqtt).length > 0) {

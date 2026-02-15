@@ -183,6 +183,23 @@ async function connectDeviceWs(
 
     if (parsed.type === "config_update") {
       receivedConfigUpdates.push(parsed);
+      if (ackMode === "disconnect_on_command") {
+        ws.close(1011, "intentional_disconnect_before_ack");
+        return;
+      }
+      if (ackMode !== "drop_ack_keep_state" && ackMode !== "drop_ack_no_state") {
+        const commandId = typeof parsed.command_id === "string" ? parsed.command_id : "";
+        if (commandId.length > 0) {
+          ws.send(
+            JSON.stringify({
+              type: "ack",
+              command_id: commandId,
+              ok: true,
+              ts: nowIso()
+            })
+          );
+        }
+      }
       return;
     }
 
@@ -561,6 +578,138 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
     );
     assert.equal(otaInvalidChannelAck.ok, false);
     assert.equal(otaInvalidChannelAck.code, "validation_error");
+
+    clientWs.ws.send(
+      JSON.stringify({
+        type: "cmd",
+        request_id: "it-cmd-button-mode-follow",
+        device_id: deviceId,
+        scope: "button_mode",
+        button_index: 1,
+        mode: "rocker_switch_follow"
+      })
+    );
+    const buttonModeAck = await clientWs.waitForMessages(
+      (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-button-mode-follow"
+    );
+    assert.equal(buttonModeAck.ok, true);
+    assert.equal((buttonModeAck.result as JsonObject).scope, "button_mode");
+
+    await waitUntil(async () => {
+      const configUpdate = deviceWs?.receivedConfigUpdates.find((msg) => {
+        const ioConfig = msg.io_config as JsonObject[] | undefined;
+        return Array.isArray(ioConfig) && ioConfig.some((row) => row.input_index === 1);
+      });
+      return Boolean(configUpdate);
+    }, 7_000);
+
+    const inputConfigAfterMode = await query<{ input_config: JsonObject[] }>(
+      `SELECT input_config
+       FROM devices
+       WHERE id = $1
+       LIMIT 1`,
+      [deviceId]
+    );
+    assert.equal(Array.isArray(inputConfigAfterMode.rows[0]?.input_config), true);
+    const rowAfterMode = inputConfigAfterMode.rows[0]?.input_config.find((row) => row.input_index === 1);
+    assert.equal(rowAfterMode?.input_type, "rocker_switch");
+    assert.equal(rowAfterMode?.rocker_mode, "follow_position");
+
+    clientWs.ws.send(
+      JSON.stringify({
+        type: "cmd",
+        request_id: "it-cmd-button-link-off",
+        device_id: deviceId,
+        scope: "button_link",
+        button_index: 1,
+        linked: false
+      })
+    );
+    const buttonLinkAck = await clientWs.waitForMessages(
+      (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-button-link-off"
+    );
+    assert.equal(buttonLinkAck.ok, true);
+    assert.equal((buttonLinkAck.result as JsonObject).scope, "button_link");
+
+    const inputConfigAfterLink = await query<{ input_config: JsonObject[] }>(
+      `SELECT input_config
+       FROM devices
+       WHERE id = $1
+       LIMIT 1`,
+      [deviceId]
+    );
+    const rowAfterLink = inputConfigAfterLink.rows[0]?.input_config.find((row) => row.input_index === 1);
+    assert.equal(rowAfterLink?.linked, false);
+    assert.equal(rowAfterLink?.target_relay_index, null);
+
+    clientWs.ws.send(
+      JSON.stringify({
+        type: "cmd",
+        request_id: "it-cmd-ha-config-on",
+        device_id: deviceId,
+        scope: "ha_config",
+        show_config: true
+      })
+    );
+    const haConfigAck = await clientWs.waitForMessages(
+      (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-ha-config-on"
+    );
+    assert.equal(haConfigAck.ok, true);
+    assert.equal((haConfigAck.result as JsonObject).scope, "ha_config");
+    assert.equal((haConfigAck.result as JsonObject).show_config, true);
+
+    const configAfterHaToggle = await query<{ config: JsonObject }>(
+      `SELECT config
+       FROM devices
+       WHERE id = $1
+       LIMIT 1`,
+      [deviceId]
+    );
+    const connectivityAfterHaToggle = (configAfterHaToggle.rows[0]?.config?.connectivity ?? {}) as JsonObject;
+    const mqttAfterHaToggle = (connectivityAfterHaToggle.mqtt ?? {}) as JsonObject;
+    assert.equal(mqttAfterHaToggle.show_config, true);
+
+    clientWs.ws.send(
+      JSON.stringify({
+        type: "cmd",
+        request_id: "it-cmd-connectivity-local",
+        device_id: deviceId,
+        scope: "connectivity_mode",
+        mode: "local_mqtt"
+      })
+    );
+    const connectivityModeAck = await clientWs.waitForMessages(
+      (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-connectivity-local"
+    );
+    assert.equal(connectivityModeAck.ok, true);
+    assert.equal((connectivityModeAck.result as JsonObject).scope, "connectivity_mode");
+    assert.equal((connectivityModeAck.result as JsonObject).mode, "local_mqtt");
+
+    const configAfterModeSwitch = await query<{ config: JsonObject }>(
+      `SELECT config
+       FROM devices
+       WHERE id = $1
+       LIMIT 1`,
+      [deviceId]
+    );
+    const connectivityAfterModeSwitch = (configAfterModeSwitch.rows[0]?.config?.connectivity ?? {}) as JsonObject;
+    assert.equal(connectivityAfterModeSwitch.mode, "local_mqtt");
+
+    clientWs.ws.send(
+      JSON.stringify({
+        type: "cmd",
+        request_id: "it-cmd-button-mode-invalid",
+        device_id: deviceId,
+        scope: "button_mode",
+        button_index: 0,
+        mode: "invalid_mode_name"
+      })
+    );
+    const buttonModeInvalidAck = await clientWs.waitForMessages(
+      (msg) => msg.type === "cmd_ack" && msg.request_id === "it-cmd-button-mode-invalid"
+    );
+    assert.equal(buttonModeInvalidAck.ok, false);
+    assert.equal(buttonModeInvalidAck.code, "validation_error");
 
     const scheduleOnAt = new Date(Date.now() + 3_000).toISOString();
     const createdOn = await requestJson(`${httpBase}/api/v1/schedules`, {
