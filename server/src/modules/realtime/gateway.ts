@@ -188,9 +188,9 @@ const wsPackage = require("ws") as {
   WebSocketServer: new (args: { noServer: boolean; maxPayload: number }) => RawWebSocketServer;
 };
 
-const DEVICE_WS_HEARTBEAT_INTERVAL_MS = 2_500;
-const DEVICE_WS_HEARTBEAT_MISS_LIMIT = 1;
-const DEVICE_OFFLINE_GRACE_MS = 5_000;
+const DEVICE_WS_HEARTBEAT_INTERVAL_MS = 5_000;
+const DEVICE_WS_HEARTBEAT_MISS_LIMIT = 3;
+const DEVICE_OFFLINE_GRACE_MS = 20_000;
 const DEVICE_COMMAND_QUEUE_MAX = 40;
 const WIFI_CONFIG_COMMAND_TIMEOUT_MS = 12_000;
 const DEVICE_CONTROL_COMMAND_TIMEOUT_MS = 8_000;
@@ -1980,9 +1980,13 @@ function handleDeviceSocket(
   let missedPongs = 0;
   let shutdownHandled = false;
 
-  socket.on("pong", () => {
+  const markAlive = () => {
     alive = true;
     missedPongs = 0;
+  };
+
+  socket.on("pong", () => {
+    markAlive();
   });
 
   const shutdown = () => {
@@ -2070,7 +2074,7 @@ function handleDeviceSocket(
       if (!alive) {
         missedPongs += 1;
         if (missedPongs >= DEVICE_WS_HEARTBEAT_MISS_LIMIT) {
-          socket.terminate();
+          socket.close(1011, "heartbeat_timeout");
           return;
         }
       } else {
@@ -2078,13 +2082,21 @@ function handleDeviceSocket(
       }
 
       alive = false;
-      socket.ping();
+      try {
+        socket.ping();
+      } catch {
+        socket.close(1011, "heartbeat_ping_failed");
+      }
     }, DEVICE_WS_HEARTBEAT_INTERVAL_MS);
   })().catch(() => {
     socket.close(1011, "auth_error");
   });
 
   socket.on("message", (raw: unknown) => {
+    // Treat any inbound message as socket liveness to avoid false
+    // disconnects when control ping/pong is delayed by transient jitter.
+    markAlive();
+
     if (!authenticated || !deviceUid || !deviceId) {
       return;
     }
