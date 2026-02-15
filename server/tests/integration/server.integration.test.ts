@@ -1105,11 +1105,8 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
         method: "GET"
       }
     );
-    assert.equal(otaCheck.status, 200);
-    assert.equal(otaCheck.body.update_available, true);
-    assert.equal((otaCheck.body.manifest as JsonObject).version, releaseVersion);
-    assert.equal(typeof (otaCheck.body.manifest as JsonObject).signature, "string");
-    assert.ok(String((otaCheck.body.manifest as JsonObject).signature).length > 10);
+    assert.equal(otaCheck.status, 410);
+    assert.equal(otaCheck.body.code, "ota_ws_only");
 
     const otaManifest = await requestJson(
       `${httpBase}/api/v1/ota/manifest/${encodeURIComponent(deviceUid)}?current=0.0.1&channel=stable&token=${encodeURIComponent(deviceToken)}`,
@@ -1117,11 +1114,8 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
         method: "GET"
       }
     );
-    assert.equal(otaManifest.status, 200);
-    assert.equal(otaManifest.body.version, releaseVersion);
-    assert.equal(otaManifest.body.security_version, 1);
-    assert.equal(typeof otaManifest.body.signature, "string");
-    assert.ok(String(otaManifest.body.signature).length > 10);
+    assert.equal(otaManifest.status, 410);
+    assert.equal(otaManifest.body.code, "ota_ws_only");
 
     const otaReport = await requestJson(`${httpBase}/api/v1/ota/report`, {
       method: "POST",
@@ -1141,30 +1135,8 @@ test("integration: schedule + automation + config sync + ota flow", async () => 
         }
       })
     });
-    assert.equal(otaReport.status, 200);
-
-    const postReport = await query<{
-      firmware_version: string | null;
-      ota_security_version: number;
-    }>(
-      `SELECT firmware_version, ota_security_version
-       FROM devices
-       WHERE id = $1
-       LIMIT 1`,
-      [deviceId]
-    );
-    assert.equal(postReport.rows[0]?.firmware_version, releaseVersion);
-    assert.equal(postReport.rows[0]?.ota_security_version, 1);
-
-    const otaReportRows = await query<{ total: string }>(
-      `SELECT COUNT(*)::text AS total
-       FROM ota_reports
-       WHERE device_id = $1
-         AND event_type = 'success'
-         AND status = 'ok'`,
-      [deviceId]
-    );
-    assert.equal(Number(otaReportRows.rows[0]?.total ?? "0"), 1);
+    assert.equal(otaReport.status, 410);
+    assert.equal(otaReport.body.code, "ota_ws_only");
 
     const timeoutProvisioned = await requestJson(`${httpBase}/api/v1/provision/register`, {
       method: "POST",

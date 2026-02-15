@@ -315,49 +315,19 @@ Prefix: `/api/v1/automations`
 
 Prefix: `/api/v1/ota`
 
-### Device Update Checks
+### OTA Runtime (WS-Only)
 
-#### `GET /check`
+Runtime OTA control/status is WebSocket-only:
 
-- Query:
-  - `device_uid` (required)
-  - `current` semver (required)
-  - optional `channel`
-  - optional `token` (device token)
-- Returns either:
-  - `update_available: false`
-  - or signed `manifest` with:
-    - `signature`
-    - `verification_key_id`
-    - `next_verification_key_id`
+- Device command path: `ota_control` (`scope=ota`)
+- Device status path: `ota_status` (device -> server)
+- Firmware delivery path: `ota_chunk` (server -> device)
 
-#### `GET /manifest/:device_uid`
+Deprecated runtime HTTP endpoints (all return `410` with `code=ota_ws_only`):
 
-- Query:
-  - optional `channel`
-  - optional `current`
-  - optional `token`
-- Returns selected signed manifest, including:
-  - `signature`
-  - `verification_key_id`
-  - `next_verification_key_id`
-
-### OTA Device Callback (Webhook-Style)
-
-#### `POST /report`
-
-- Purpose: device callback for OTA state transitions.
-- Body:
-  - `device_uid`
-  - `device_token`
-  - `event_type` in `check|download|verify|install|rollback|success|failure|boot_ok`
-  - `status` in `ok|error|in_progress|rejected`
-  - optional `from_version`, `to_version`, `security_version`, `reason`, `details`
-- Behavior:
-  - records row in `ota_reports`
-  - updates device OTA status/version fields
-  - rejects rollback if reported `security_version` is below current minimum
-  - pushes `ota_status` realtime event to owner clients
+- `GET /check`
+- `GET /manifest/:device_uid`
+- `POST /report`
 
 ### OTA Release Management (Admin)
 
@@ -526,9 +496,8 @@ Relay/admin command behavior:
 
 Incoming webhook-style HTTP callbacks implemented:
 
-1. `POST /api/v1/ota/report` (device OTA status callback)
-2. `POST /api/v1/alexa/smart-home` (Alexa directive callback)
-3. `POST /api/v1/devices/sensor-report` (device sensor event callback)
+1. `POST /api/v1/alexa/smart-home` (Alexa directive callback)
+2. `POST /api/v1/devices/sensor-report` (device sensor event callback)
 
 Outbound HTTP webhooks:
 
@@ -613,22 +582,6 @@ curl -X POST http://localhost:3000/api/v1/admin/ops/backup/run \
   -H "authorization: Bearer <access_token>" \
   -H "content-type: application/json" \
   -d '{}'
-```
-
-### OTA Report Callback (device webhook-style)
-
-```bash
-curl -X POST http://localhost:3000/api/v1/ota/report \
-  -H "content-type: application/json" \
-  -d '{
-    "device_uid":"hexa-mini-001",
-    "device_token":"dt_...",
-    "event_type":"success",
-    "status":"ok",
-    "from_version":"1.0.0",
-    "to_version":"1.1.0",
-    "security_version":3
-  }'
 ```
 
 ### Save User Dashboard Preferences

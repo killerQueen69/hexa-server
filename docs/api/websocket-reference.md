@@ -182,9 +182,62 @@ If `connectivity.wifi.op` is `set` or `clear`, firmware applies the Wi-Fi creden
 {
   "type": "ota_control",
   "command_id": "uuid",
-  "operation": "check",
+  "operation": "install",
   "channel": "stable",
+  "transfer_id": "uuid",
+  "manifest": {
+    "version": "0.2.1",
+    "security_version": 1,
+    "channel": "stable",
+    "url": "https://api.vistfiy.store/api/v1/ota/artifacts/hexa/stable/0.2.1/fw.bin",
+    "size_bytes": 587432,
+    "sha256": "0123...abcd",
+    "signature_alg": "ecdsa-p256-sha256",
+    "expires_at": "2026-03-31T23:59:59.000Z",
+    "signature": "base64url-signature",
+    "verification_key_id": "ota-key-2026-01",
+    "next_verification_key_id": "ota-key-2026-04"
+  },
   "ts": "2026-02-13T12:03:00.000Z"
+}
+```
+
+Notes:
+
+- OTA is WS-manifest driven. Device does not fetch OTA manifest over HTTP.
+- `operation=check` also carries manifest when update is available.
+- `transfer_id` is required for `operation=install`.
+
+### `ota_chunk`
+
+```json
+{
+  "type": "ota_chunk",
+  "command_id": "uuid",
+  "transfer_id": "uuid",
+  "chunk_index": 0,
+  "offset": 0,
+  "data_b64": "base64url-firmware-bytes",
+  "is_last": false,
+  "ts": "2026-02-13T12:03:01.000Z"
+}
+```
+
+Notes:
+
+- Chunks are sent sequentially over WS text frames.
+- Device ACKs each chunk via normal `ack` using `command_id`.
+- `is_last=true` marks final chunk; device verifies full SHA-256 and finalizes OTA.
+
+### `ota_abort`
+
+```json
+{
+  "type": "ota_abort",
+  "command_id": "uuid",
+  "transfer_id": "uuid",
+  "reason": "ws_transfer_failed",
+  "ts": "2026-02-13T12:03:10.000Z"
 }
 ```
 

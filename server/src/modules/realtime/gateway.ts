@@ -1,10 +1,15 @@
 import { FastifyInstance } from "fastify";
 import { IncomingMessage } from "node:http";
+import { createReadStream } from "node:fs";
+import { access, stat } from "node:fs/promises";
+import path from "node:path";
+import semver from "semver";
 import { env } from "../../config/env";
 import { query } from "../../db/connection";
 import { realtimeHub } from "../../realtime/hub";
 import { automationService } from "../../services/automation-service";
 import { deviceStateCache } from "../../services/device-state-cache";
+import { type OtaManifestPayload, verifyManifestSignature } from "../../services/ota-manifest-signer";
 import { RelayServiceError, relayService } from "../../services/relay-service";
 import { smartHomeService } from "../../services/smart-home-service";
 import { newId, sha256 } from "../../utils/crypto";
@@ -49,6 +54,42 @@ type ClientCommand =
   | ClientDeviceControlCommand
   | ClientOtaCommand;
 
+type DeviceOtaLookupRow = {
+  id: string;
+  device_uid: string;
+  is_active: boolean;
+  model: string;
+  firmware_version: string | null;
+  ota_channel: OtaChannel;
+  ota_security_version: number;
+};
+
+type OtaReleaseRow = {
+  id: string;
+  model: string;
+  version: string;
+  security_version: number | string;
+  channel: OtaChannel;
+  url: string;
+  size_bytes: number | string;
+  sha256: string;
+  signature_alg: string;
+  signature: string;
+  verification_key_id: string;
+  next_verification_key_id: string | null;
+  manifest_payload: unknown;
+  metadata: unknown;
+};
+
+type OtaResolvedRelease = {
+  manifest: OtaManifestPayload & {
+    signature: string;
+    verification_key_id: string;
+    next_verification_key_id: string | null;
+  };
+  artifactPath: string;
+};
+
 type RawWebSocket = {
   readyState: number;
   OPEN: number;
@@ -83,10 +124,13 @@ const DEVICE_COMMAND_QUEUE_MAX = 40;
 const WIFI_CONFIG_COMMAND_TIMEOUT_MS = 12_000;
 const DEVICE_CONTROL_COMMAND_TIMEOUT_MS = 8_000;
 const OTA_CONTROL_COMMAND_TIMEOUT_MS = 12_000;
+const OTA_WS_CHUNK_BYTES = 768;
+const OTA_WS_CHUNK_ACK_TIMEOUT_MS = 8_000;
 const WIFI_SSID_MAX_LEN = 32;
 const WIFI_PASSWORD_MAX_LEN = 63;
 const pendingOfflineTimers = new Map<string, NodeJS.Timeout>();
 const deviceCommandQueues = new Map<string, DeviceCommandQueue>();
+const activeOtaStreams = new Set<string>();
 
 type DeviceCommandTask = () => Promise<void>;
 
@@ -200,6 +244,382 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function asNonNegativeInt(value: number | string): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.trunc(value));
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return Math.max(0, Math.trunc(parsed));
+    }
+  }
+  return 0;
+}
+
+function asOtaManifestPayload(value: unknown): OtaManifestPayload | null {
+  const obj = asRecord(value);
+  if (!obj) {
+    return null;
+  }
+
+  const version = typeof obj.version === "string" ? obj.version.trim() : "";
+  const channelRaw = typeof obj.channel === "string" ? obj.channel.trim().toLowerCase() : "";
+  const url = typeof obj.url === "string" ? obj.url.trim() : "";
+  const sha256Raw = typeof obj.sha256 === "string" ? obj.sha256.trim().toLowerCase() : "";
+  const signatureAlg = typeof obj.signature_alg === "string" ? obj.signature_alg.trim() : "";
+  const expiresAt = typeof obj.expires_at === "string" ? obj.expires_at.trim() : "";
+  const securityVersion = asNonNegativeInt(
+    typeof obj.security_version === "number" || typeof obj.security_version === "string"
+      ? (obj.security_version as number | string)
+      : -1
+  );
+  const sizeBytes = asNonNegativeInt(
+    typeof obj.size_bytes === "number" || typeof obj.size_bytes === "string"
+      ? (obj.size_bytes as number | string)
+      : -1
+  );
+
+  if (!version || !url || !expiresAt) {
+    return null;
+  }
+  if (channelRaw !== "dev" && channelRaw !== "beta" && channelRaw !== "stable") {
+    return null;
+  }
+  if (signatureAlg !== "ecdsa-p256-sha256") {
+    return null;
+  }
+  if (!/^[a-f0-9]{64}$/.test(sha256Raw)) {
+    return null;
+  }
+  if (sizeBytes <= 0) {
+    return null;
+  }
+
+  return {
+    version,
+    security_version: securityVersion,
+    channel: channelRaw as OtaChannel,
+    url,
+    size_bytes: sizeBytes,
+    sha256: sha256Raw,
+    signature_alg: "ecdsa-p256-sha256",
+    expires_at: expiresAt
+  };
+}
+
+function releaseMatchesManifest(row: OtaReleaseRow, manifest: OtaManifestPayload): boolean {
+  const releaseSize = asNonNegativeInt(row.size_bytes);
+  const releaseSecurityVersion = asNonNegativeInt(row.security_version);
+  return (
+    row.version === manifest.version &&
+    row.channel === manifest.channel &&
+    row.url === manifest.url &&
+    releaseSize === manifest.size_bytes &&
+    row.sha256.toLowerCase() === manifest.sha256.toLowerCase() &&
+    row.signature_alg === manifest.signature_alg &&
+    releaseSecurityVersion === manifest.security_version
+  );
+}
+
+async function loadSigningPublicKeyMap(): Promise<Map<string, string>> {
+  const result = await query<{ key_id: string; public_key_pem: string }>(
+    `SELECT key_id, public_key_pem
+     FROM ota_signing_keys`
+  );
+  const map = new Map<string, string>();
+  for (const row of result.rows) {
+    map.set(row.key_id, row.public_key_pem);
+  }
+  return map;
+}
+
+function normalizeArtifactKey(rawKey: string): string | null {
+  const decoded = rawKey.replace(/\\/g, "/");
+  const segments = decoded.split("/").filter((segment) => segment.length > 0 && segment !== ".");
+  if (segments.length === 0 || segments.some((segment) => segment === "..")) {
+    return null;
+  }
+  return segments.join("/");
+}
+
+function resolveArtifactAbsolutePath(rootDir: string, key: string): string | null {
+  const normalized = normalizeArtifactKey(key);
+  if (!normalized) {
+    return null;
+  }
+  const absolute = path.resolve(rootDir, ...normalized.split("/"));
+  const normalizedRoot = path.resolve(rootDir);
+  if (absolute !== normalizedRoot && !absolute.startsWith(`${normalizedRoot}${path.sep}`)) {
+    return null;
+  }
+  return absolute;
+}
+
+function artifactRootDir(): string {
+  return path.resolve(process.cwd(), env.OTA_ARTIFACTS_DIR);
+}
+
+function decodeUriComponentSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function artifactKeyFromManifestUrl(manifestUrl: string): string | null {
+  try {
+    const parsed = new URL(manifestUrl);
+    const marker = "/api/v1/ota/artifacts/";
+    const index = parsed.pathname.indexOf(marker);
+    if (index < 0) {
+      return null;
+    }
+    const encodedKey = parsed.pathname.slice(index + marker.length);
+    const decodedSegments = encodedKey
+      .split("/")
+      .map((segment) => decodeUriComponentSafe(segment))
+      .filter((segment) => segment.length > 0);
+    if (decodedSegments.length === 0) {
+      return null;
+    }
+    return normalizeArtifactKey(decodedSegments.join("/"));
+  } catch {
+    return null;
+  }
+}
+
+function artifactKeyFromMetadata(metadata: unknown): string | null {
+  const metadataObj = asRecord(metadata);
+  const artifactObj = asRecord(metadataObj?.artifact);
+  const artifactKey = typeof artifactObj?.key === "string" ? artifactObj.key : "";
+  if (!artifactKey) {
+    return null;
+  }
+  return normalizeArtifactKey(artifactKey);
+}
+
+async function resolveOtaReleaseForDevice(params: {
+  model: string;
+  channel: OtaChannel;
+  currentVersion: string | null;
+  minimumSecurityVersion: number;
+}): Promise<OtaResolvedRelease | null> {
+  const releases = await query<OtaReleaseRow>(
+    `SELECT
+       id, model, version, security_version, channel, url, size_bytes,
+       sha256, signature_alg, signature, verification_key_id, next_verification_key_id,
+       manifest_payload, metadata
+     FROM ota_releases
+     WHERE model = $1
+       AND channel = $2
+       AND is_active = TRUE
+       AND expires_at > now()
+       AND security_version >= $3`,
+    [params.model, params.channel, params.minimumSecurityVersion]
+  );
+
+  const candidates = releases.rows
+    .filter((row) => semver.valid(row.version))
+    .sort((a, b) => semver.rcompare(a.version, b.version));
+
+  const keyMap = await loadSigningPublicKeyMap();
+  const currentVersion = semver.valid(params.currentVersion ?? "")
+    ? (params.currentVersion as string)
+    : "0.0.0";
+
+  for (const candidate of candidates) {
+    const manifest = asOtaManifestPayload(candidate.manifest_payload);
+    if (!manifest) {
+      continue;
+    }
+    if (!releaseMatchesManifest(candidate, manifest)) {
+      continue;
+    }
+    if (!semver.gt(candidate.version, currentVersion)) {
+      continue;
+    }
+
+    const verificationKey = keyMap.get(candidate.verification_key_id);
+    if (!verificationKey) {
+      continue;
+    }
+    if (candidate.next_verification_key_id && !keyMap.has(candidate.next_verification_key_id)) {
+      continue;
+    }
+    if (!verifyManifestSignature(manifest, candidate.signature, verificationKey)) {
+      continue;
+    }
+
+    const artifactKey = artifactKeyFromMetadata(candidate.metadata) ?? artifactKeyFromManifestUrl(manifest.url);
+    if (!artifactKey) {
+      continue;
+    }
+    const artifactPath = resolveArtifactAbsolutePath(artifactRootDir(), artifactKey);
+    if (!artifactPath) {
+      continue;
+    }
+
+    try {
+      await access(artifactPath);
+      const info = await stat(artifactPath);
+      if (!info.isFile()) {
+        continue;
+      }
+      if (info.size !== manifest.size_bytes) {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+
+    return {
+      manifest: {
+        ...manifest,
+        signature: candidate.signature,
+        verification_key_id: candidate.verification_key_id,
+        next_verification_key_id: candidate.next_verification_key_id
+      },
+      artifactPath
+    };
+  }
+
+  return null;
+}
+
+async function sendOtaAbort(deviceUid: string, transferId: string, reason: string): Promise<void> {
+  const commandId = newId();
+  realtimeHub.sendToDevice(deviceUid, {
+    type: "ota_abort",
+    command_id: commandId,
+    transfer_id: transferId,
+    reason,
+    ts: nowIso()
+  });
+}
+
+async function streamOtaArtifactOverWs(params: {
+  deviceUid: string;
+  transferId: string;
+  artifactPath: string;
+  timeoutMs: number;
+}): Promise<void> {
+  const artifactInfo = await stat(params.artifactPath);
+  if (!artifactInfo.isFile() || artifactInfo.size <= 0) {
+    throw new Error("artifact_not_found");
+  }
+
+  const stream = createReadStream(params.artifactPath, {
+    highWaterMark: OTA_WS_CHUNK_BYTES
+  });
+  const totalBytes = artifactInfo.size;
+
+  let offset = 0;
+  let chunkIndex = 0;
+  for await (const chunk of stream) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+    const isLast = offset + buffer.length >= totalBytes;
+    const commandId = newId();
+    const pendingAck = realtimeHub.createPendingAck(commandId, params.deviceUid, params.timeoutMs);
+    const sent = realtimeHub.sendToDevice(params.deviceUid, {
+      type: "ota_chunk",
+      command_id: commandId,
+      transfer_id: params.transferId,
+      chunk_index: chunkIndex,
+      offset,
+      data_b64: buffer.toString("base64url"),
+      is_last: isLast,
+      ts: nowIso()
+    });
+
+    if (!sent) {
+      realtimeHub.resolveAck(commandId, {
+        ok: false,
+        error: "device_disconnected"
+      });
+      throw new Error("device_disconnected");
+    }
+
+    const ack = await pendingAck;
+    if (!ack.ok) {
+      throw new Error(typeof ack.error === "string" && ack.error.length > 0 ? ack.error : "chunk_rejected");
+    }
+
+    offset += buffer.length;
+    chunkIndex += 1;
+  }
+}
+
+async function persistOtaStatusFromWs(params: {
+  deviceId: string;
+  message: Record<string, unknown>;
+}): Promise<void> {
+  const eventType =
+    typeof params.message.event_type === "string" && params.message.event_type.trim().length > 0
+      ? params.message.event_type.trim()
+      : "unknown";
+  const status =
+    typeof params.message.status === "string" && params.message.status.trim().length > 0
+      ? params.message.status.trim()
+      : "unknown";
+  const fromVersion = typeof params.message.from_version === "string" ? params.message.from_version : null;
+  const toVersion = typeof params.message.to_version === "string" ? params.message.to_version : null;
+  const securityVersion =
+    typeof params.message.security_version === "number" && Number.isInteger(params.message.security_version)
+      ? params.message.security_version
+      : null;
+  const reasonFromRoot = typeof params.message.reason === "string" ? params.message.reason : null;
+  const details = asRecord(params.message.details) ?? {};
+  const reasonFromDetails = typeof details.reason === "string" ? details.reason : null;
+  const reason = reasonFromRoot ?? reasonFromDetails;
+  const now = nowIso();
+
+  await query(
+    `INSERT INTO ota_reports (
+       id, device_id, event_type, status, from_version, to_version,
+       security_version, details, created_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6,
+       $7, $8::jsonb, $9
+     )`,
+    [
+      newId(),
+      params.deviceId,
+      eventType,
+      status,
+      fromVersion,
+      toVersion,
+      securityVersion,
+      JSON.stringify({
+        ...details,
+        command_id: typeof params.message.command_id === "string" ? params.message.command_id : null,
+        reason
+      }),
+      now
+    ]
+  );
+
+  const completed = status === "ok" && (eventType === "success" || eventType === "boot_ok");
+  await query(
+    `UPDATE devices
+     SET last_ota_status = $1,
+         last_ota_reason = $2,
+         last_ota_check_at = $3,
+         firmware_version = CASE
+           WHEN $4 = TRUE AND $5 IS NOT NULL THEN $5
+           ELSE firmware_version
+         END,
+         ota_security_version = CASE
+           WHEN $4 = TRUE AND $6 IS NOT NULL THEN GREATEST(ota_security_version, $6)
+           ELSE ota_security_version
+         END,
+         updated_at = $3
+     WHERE id = $7`,
+    [status, reason, now, completed, toVersion, securityVersion, params.deviceId]
+  );
 }
 
 async function isDeviceOwner(userId: string, deviceId: string): Promise<boolean> {
@@ -564,7 +984,7 @@ async function sendOtaControlCommand(params: {
   channel?: OtaChannel;
   timeoutMs: number;
 }): Promise<
-  | { ok: true; deviceUid: string; latencyMs: number }
+  | { ok: true; deviceUid: string; latencyMs: number; updateAvailable: boolean; transferId?: string }
   | {
       ok: false;
       code: string;
@@ -574,15 +994,17 @@ async function sendOtaControlCommand(params: {
 > {
   const isAdminActor = params.role === "admin";
   const lookup = isAdminActor
-    ? await query<{ device_uid: string; is_active: boolean }>(
+    ? await query<DeviceOtaLookupRow>(
         `SELECT device_uid, is_active
+                , id, model, firmware_version, ota_channel, ota_security_version
          FROM devices
          WHERE id = $1
          LIMIT 1`,
         [params.deviceId]
       )
-    : await query<{ device_uid: string; is_active: boolean }>(
+    : await query<DeviceOtaLookupRow>(
         `SELECT device_uid, is_active
+                , id, model, firmware_version, ota_channel, ota_security_version
          FROM devices
          WHERE id = $1
            AND owner_user_id = $2
@@ -611,23 +1033,50 @@ async function sendOtaControlCommand(params: {
     };
   }
 
+  if (params.operation === "install" && activeOtaStreams.has(row.device_uid)) {
+    return {
+      ok: false,
+      code: "ota_in_progress",
+      message: "An OTA transfer is already active for this device."
+    };
+  }
+
+  const channel = params.channel ?? row.ota_channel;
+  const resolved = await resolveOtaReleaseForDevice({
+    model: row.model,
+    channel,
+    currentVersion: row.firmware_version,
+    minimumSecurityVersion: asNonNegativeInt(row.ota_security_version)
+  });
+
+  if (!resolved) {
+    if (params.operation === "check") {
+      return {
+        ok: true,
+        deviceUid: row.device_uid,
+        latencyMs: 0,
+        updateAvailable: false
+      };
+    }
+    return {
+      ok: false,
+      code: "manifest_not_found",
+      message: "No eligible OTA release for this device/channel."
+    };
+  }
+
   const commandId = newId();
+  const transferId = params.operation === "install" ? newId() : undefined;
   const pendingAck = realtimeHub.createPendingAck(commandId, row.device_uid, params.timeoutMs);
-  const payload =
-    typeof params.channel === "string"
-      ? {
-          type: "ota_control",
-          command_id: commandId,
-          operation: params.operation,
-          channel: params.channel,
-          ts: nowIso()
-        }
-      : {
-          type: "ota_control",
-          command_id: commandId,
-          operation: params.operation,
-          ts: nowIso()
-        };
+  const payload = {
+    type: "ota_control",
+    command_id: commandId,
+    operation: params.operation,
+    channel,
+    transfer_id: transferId,
+    manifest: resolved.manifest,
+    ts: nowIso()
+  };
 
   const sent = realtimeHub.sendToDevice(row.device_uid, payload);
   if (!sent) {
@@ -660,10 +1109,33 @@ async function sendOtaControlCommand(params: {
         }
       };
     }
+
+    if (params.operation === "install" && transferId) {
+      activeOtaStreams.add(row.device_uid);
+      void streamOtaArtifactOverWs({
+        deviceUid: row.device_uid,
+        transferId,
+        artifactPath: resolved.artifactPath,
+        timeoutMs: OTA_WS_CHUNK_ACK_TIMEOUT_MS
+      })
+        .catch(async (error) => {
+          const reason =
+            error instanceof Error && error.message.trim().length > 0
+              ? error.message.trim()
+              : "ws_transfer_failed";
+          await sendOtaAbort(row.device_uid, transferId, reason);
+        })
+        .finally(() => {
+          activeOtaStreams.delete(row.device_uid);
+        });
+    }
+
     return {
       ok: true,
       deviceUid: row.device_uid,
-      latencyMs: ack.latencyMs
+      latencyMs: ack.latencyMs,
+      updateAvailable: true,
+      transferId
     };
   } catch (error) {
     if (error instanceof Error && error.message === "ack_timeout") {
@@ -677,7 +1149,10 @@ async function sendOtaControlCommand(params: {
         }
       };
     }
-    if (error instanceof Error && error.message === "device_disconnected") {
+    if (
+      error instanceof Error &&
+      (error.message === "device_disconnected" || error.message === "device_offline")
+    ) {
       return {
         ok: false,
         code: "device_offline",
@@ -1061,6 +1536,11 @@ function handleDeviceSocket(
             nowIso()
           ]
         ).catch(() => undefined);
+
+        void persistOtaStatusFromWs({
+          deviceId,
+          message
+        }).catch(() => undefined);
       }
 
       void readOwnerUserId(deviceId)
@@ -1523,7 +2003,9 @@ function handleClientSocket(
               scope: "ota",
               operation: command.operation,
               channel: command.channel ?? null,
-              latency_ms: otaControlResult.latencyMs
+              latency_ms: otaControlResult.latencyMs,
+              update_available: otaControlResult.updateAvailable,
+              transfer_id: otaControlResult.transferId ?? null
             }
           });
           return;

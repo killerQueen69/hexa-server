@@ -921,263 +921,31 @@ export async function otaRoutes(server: FastifyInstance): Promise<void> {
     }
   });
 
-  server.get("/check", async (request, reply) => {
-    const parsedQuery = otaCheckQuerySchema.safeParse(request.query);
-    if (!parsedQuery.success) {
-      return sendApiError(reply, 400, "validation_error", "Invalid query parameters.", parsedQuery.error.flatten());
-    }
-
-    const queryParams = parsedQuery.data;
-    if (!semver.valid(queryParams.current)) {
-      return sendApiError(reply, 400, "validation_error", "current must be a valid semantic version.");
-    }
-
-    const device = await findDevice(queryParams.device_uid);
-    if (!device) {
-      return sendApiError(reply, 404, "not_found", "Device not found.");
-    }
-
-    if (queryParams.token) {
-      const tokenHash = sha256(queryParams.token);
-      if (tokenHash !== device.device_token_hash) {
-        return sendApiError(reply, 401, "unauthorized", "Device token is invalid.");
-      }
-    }
-
-    const channel = queryParams.channel ?? device.ota_channel;
-    const resolved = await resolveBestRelease({
-      model: device.model,
-      channel,
-      currentVersion: queryParams.current,
-      minimumSecurityVersion: device.ota_security_version
-    });
-
-    const now = nowIso();
-    await query(
-      `UPDATE devices
-       SET last_ota_check_at = $1,
-           last_ota_status = $2,
-           updated_at = $1
-       WHERE id = $3`,
-      [now, resolved ? "update_available" : "up_to_date", device.id]
+  server.get("/check", async (_request, reply) => {
+    return sendApiError(
+      reply,
+      410,
+      "ota_ws_only",
+      "OTA check over HTTP is deprecated. Use WebSocket ota_control (scope=ota, operation=check)."
     );
-
-    if (!resolved) {
-      return reply.send({
-        update_available: false,
-        device_uid: device.device_uid,
-        current: queryParams.current,
-        channel
-      });
-    }
-
-    return reply.send({
-      update_available: true,
-      device_uid: device.device_uid,
-      current: queryParams.current,
-      channel,
-      manifest: {
-        ...resolved.manifest,
-        signature: resolved.release.signature,
-        verification_key_id: resolved.release.verification_key_id,
-        next_verification_key_id: resolved.release.next_verification_key_id
-      }
-    });
   });
 
-  server.get("/manifest/:device_uid", async (request, reply) => {
-    const params = request.params as { device_uid: string };
-    const parsedQuery = otaManifestQuerySchema.safeParse(request.query);
-    if (!parsedQuery.success) {
-      return sendApiError(reply, 400, "validation_error", "Invalid query parameters.", parsedQuery.error.flatten());
-    }
-    const queryParams = parsedQuery.data;
-
-    const device = await findDevice(params.device_uid);
-    if (!device) {
-      return sendApiError(reply, 404, "not_found", "Device not found.");
-    }
-
-    if (queryParams.token) {
-      const tokenHash = sha256(queryParams.token);
-      if (tokenHash !== device.device_token_hash) {
-        return sendApiError(reply, 401, "unauthorized", "Device token is invalid.");
-      }
-    }
-
-    const channel = queryParams.channel ?? device.ota_channel;
-    const currentVersion = queryParams.current ?? device.firmware_version ?? "0.0.0";
-    const resolved = await resolveBestRelease({
-      model: device.model,
-      channel,
-      currentVersion,
-      minimumSecurityVersion: device.ota_security_version
-    });
-
-    if (!resolved) {
-      return sendApiError(reply, 404, "manifest_not_found", "No active manifest for device.");
-    }
-
-    await query(
-      `UPDATE devices
-       SET last_ota_check_at = $1,
-           last_ota_status = $2,
-           updated_at = $1
-       WHERE id = $3`,
-      [nowIso(), "manifest_served", device.id]
+  server.get("/manifest/:device_uid", async (_request, reply) => {
+    return sendApiError(
+      reply,
+      410,
+      "ota_ws_only",
+      "OTA manifest over HTTP is deprecated. Use WebSocket ota_control with embedded signed manifest."
     );
-
-    return reply.send({
-      device_uid: device.device_uid,
-      model: device.model,
-      ...resolved.manifest,
-      signature: resolved.release.signature,
-      verification_key_id: resolved.release.verification_key_id,
-      next_verification_key_id: resolved.release.next_verification_key_id
-    });
   });
 
-  server.post("/report", async (request, reply) => {
-    const parsed = otaReportSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return sendApiError(reply, 400, "validation_error", "Invalid request body.", parsed.error.flatten());
-    }
-
-    const payload = parsed.data;
-    const tokenHash = sha256(payload.device_token);
-    const deviceLookup = await query<DeviceOtaRow>(
-      `SELECT
-         id, device_uid, model, firmware_version, ota_channel, ota_security_version,
-         owner_user_id, device_token_hash
-       FROM devices
-       WHERE device_uid = $1
-         AND device_token_hash = $2
-         AND is_active = TRUE
-       LIMIT 1`,
-      [payload.device_uid, tokenHash]
+  server.post("/report", async (_request, reply) => {
+    return sendApiError(
+      reply,
+      410,
+      "ota_ws_only",
+      "OTA report over HTTP is deprecated. OTA status is ingested from device WebSocket ota_status events."
     );
-    const device = deviceLookup.rows[0];
-    if (!device) {
-      return sendApiError(reply, 401, "unauthorized", "Device credentials are invalid.");
-    }
-
-    if (
-      payload.status === "ok" &&
-      (payload.event_type === "success" || payload.event_type === "boot_ok") &&
-      typeof payload.security_version === "number" &&
-      payload.security_version < device.ota_security_version
-    ) {
-      const nowRejected = nowIso();
-      await query(
-        `INSERT INTO ota_reports (
-           id, device_id, event_type, status, from_version, to_version,
-           security_version, details, created_at
-         ) VALUES (
-           $1, $2, $3, 'rejected', $4, $5,
-           $6, $7::jsonb, $8
-         )`,
-        [
-          newId(),
-          device.id,
-          payload.event_type,
-          payload.from_version ?? null,
-          payload.to_version ?? null,
-          payload.security_version,
-          JSON.stringify({
-            reason: "security_version_rollback_rejected",
-            reported_security_version: payload.security_version,
-            required_minimum: device.ota_security_version
-          }),
-          nowRejected
-        ]
-      );
-
-      await query(
-        `UPDATE devices
-         SET last_ota_status = 'rejected',
-             last_ota_reason = 'security_version_rollback_rejected',
-             updated_at = $1
-         WHERE id = $2`,
-        [nowRejected, device.id]
-      );
-
-      return sendApiError(
-        reply,
-        409,
-        "ota_security_rollback_rejected",
-        "Reported security_version is lower than device minimum accepted version."
-      );
-    }
-
-    const now = nowIso();
-    const nextSecurityVersion = Math.max(
-      device.ota_security_version,
-      payload.security_version ?? device.ota_security_version
-    );
-
-    await query(
-      `INSERT INTO ota_reports (
-         id, device_id, event_type, status, from_version, to_version,
-         security_version, details, created_at
-       ) VALUES (
-         $1, $2, $3, $4, $5, $6,
-         $7, $8::jsonb, $9
-       )`,
-      [
-        newId(),
-        device.id,
-        payload.event_type,
-        payload.status,
-        payload.from_version ?? null,
-        payload.to_version ?? null,
-        payload.security_version ?? null,
-        JSON.stringify({
-          reason: payload.reason ?? null,
-          ...payload.details
-        }),
-        now
-      ]
-    );
-
-    const finalFirmwareVersion =
-      payload.status === "ok" && (payload.event_type === "success" || payload.event_type === "boot_ok")
-        ? payload.to_version ?? device.firmware_version
-        : device.firmware_version;
-
-    await query(
-      `UPDATE devices
-       SET ota_security_version = $1,
-           firmware_version = $2,
-           last_ota_status = $3,
-           last_ota_reason = $4,
-           updated_at = $5
-       WHERE id = $6`,
-      [
-        nextSecurityVersion,
-        finalFirmwareVersion,
-        payload.status,
-        payload.reason ?? null,
-        now,
-        device.id
-      ]
-    );
-
-    if (device.owner_user_id) {
-      realtimeHub.broadcastToUser(device.owner_user_id, {
-        type: "ota_status",
-        device_uid: device.device_uid,
-        event_type: payload.event_type,
-        status: payload.status,
-        from_version: payload.from_version ?? null,
-        to_version: payload.to_version ?? null,
-        security_version: payload.security_version ?? null,
-        reason: payload.reason ?? null,
-        details: payload.details,
-        ts: now
-      });
-    }
-
-    return reply.send({ ok: true });
   });
 
   server.get("/releases", { preHandler: [authenticate, requireRole(["admin"])] }, async (request, reply) => {
