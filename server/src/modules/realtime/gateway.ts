@@ -1620,7 +1620,14 @@ async function sendOtaControlCommand(params: {
   channel?: OtaChannel;
   timeoutMs: number;
 }): Promise<
-  | { ok: true; deviceUid: string; latencyMs: number; updateAvailable: boolean; transferId?: string }
+  | {
+      ok: true;
+      deviceUid: string;
+      latencyMs: number;
+      updateAvailable: boolean;
+      transferId?: string;
+      targetVersion?: string;
+    }
   | {
       ok: false;
       code: string;
@@ -1771,7 +1778,8 @@ async function sendOtaControlCommand(params: {
       deviceUid: row.device_uid,
       latencyMs: ack.latencyMs,
       updateAvailable: true,
-      transferId
+      transferId,
+      targetVersion: resolved.manifest.version
     };
   } catch (error) {
     if (error instanceof Error && error.message === "ack_timeout") {
@@ -2794,7 +2802,8 @@ function handleClientSocket(
               channel: command.channel ?? null,
               latency_ms: otaControlResult.latencyMs,
               update_available: otaControlResult.updateAvailable,
-              transfer_id: otaControlResult.transferId ?? null
+              transfer_id: otaControlResult.transferId ?? null,
+              target_version: otaControlResult.targetVersion ?? null
             }
           });
           return;
