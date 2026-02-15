@@ -1430,6 +1430,57 @@ export async function adminRoutes(server: FastifyInstance): Promise<void> {
     return reply.send(runResult);
   });
 
+  server.delete("/automations/:id", { preHandler: preHandlers }, async (request, reply) => {
+    const params = request.params as { id: string };
+    const ownership = await query<{
+      id: string;
+      user_id: string;
+      device_id: string | null;
+      owner_user_id: string | null;
+    }>(
+      `SELECT ar.id, ar.user_id, ar.device_id, d.owner_user_id
+       FROM automation_rules ar
+       LEFT JOIN devices d ON d.id = ar.device_id
+       WHERE ar.id = $1
+       LIMIT 1`,
+      [params.id]
+    );
+    const row = ownership.rows[0];
+    if (!row || !row.device_id || !row.owner_user_id) {
+      return sendApiError(reply, 404, "not_found", "Automation for claimed device not found.");
+    }
+    if (row.user_id !== row.owner_user_id) {
+      return sendApiError(
+        reply,
+        409,
+        "ownership_mismatch",
+        "Automation does not belong to the current device owner."
+      );
+    }
+
+    const deleted = await query<{ device_id: string }>(
+      `DELETE FROM automation_rules
+       WHERE id = $1
+         AND user_id = $2
+       RETURNING device_id`,
+      [params.id, row.user_id]
+    );
+    if (!deleted.rowCount || deleted.rowCount === 0) {
+      return sendApiError(reply, 404, "not_found", "Automation not found.");
+    }
+
+    const deviceId = deleted.rows[0]?.device_id;
+    if (deviceId) {
+      void deviceFallbackSyncService.syncDeviceFallback(deviceId).catch(() => undefined);
+    }
+
+    return reply.send({
+      ok: true,
+      automation_id: params.id,
+      device_id: deviceId
+    });
+  });
+
   server.post("/schedules/:id/run-now", { preHandler: preHandlers }, async (request, reply) => {
     const params = request.params as { id: string };
     const ownership = await query<{

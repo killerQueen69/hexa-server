@@ -1779,7 +1779,10 @@
                     <div class="automation-test-row-meta code">${escapeHtml(id)}</div>
                     <div class="automation-test-row-meta">${escapeHtml(triggerType)} -> ${escapeHtml(actionType)} (${escapeHtml(enabled)})</div>
                   </div>
-                  <button data-run-automation-now="${escapeHtml(deviceId)}:${escapeHtml(id)}" ${claimed ? "" : "disabled"}>Run Automation Now</button>
+                  <div class="row">
+                    <button data-run-automation-now="${escapeHtml(deviceId)}:${escapeHtml(id)}" ${claimed ? "" : "disabled"}>Run Automation Now</button>
+                    <button class="danger" data-delete-automation="${escapeHtml(deviceId)}:${escapeHtml(id)}" ${claimed ? "" : "disabled"}>Delete</button>
+                  </div>
                 </div>
               </div>
             `;
@@ -3817,6 +3820,7 @@
       const wifiClear = target.getAttribute("data-wifi-clear");
       const loadAutomationTests = target.getAttribute("data-load-automation-tests");
       const runAutomationNow = target.getAttribute("data-run-automation-now");
+      const deleteAutomation = target.getAttribute("data-delete-automation");
       const runScheduleNow = target.getAttribute("data-run-schedule-now");
       const createAutomation = target.getAttribute("data-create-automation");
       const createSchedule = target.getAttribute("data-create-schedule");
@@ -3926,6 +3930,36 @@
               `${reason ? ` reason=${reason}` : ""}${code ? ` code=${code}` : ""}`
             );
             await loadDevices();
+            await loadAutomationTesting(deviceId, { force: true });
+          });
+          return;
+        }
+
+        if (deleteAutomation) {
+          if (!isAdminUser()) {
+            throw new Error("forbidden: Insufficient role.");
+          }
+          const split = deleteAutomation.split(":");
+          const deviceId = split[0] || "";
+          const automationId = split[1] || "";
+          if (!deviceId || !automationId) {
+            throw new Error("Invalid automation delete payload.");
+          }
+
+          const device = state.devices.find((item) => item && item.id === deviceId);
+          if (!device || !device.owner_user_id) {
+            throw new Error("Device must be claimed before deleting automation.");
+          }
+
+          if (!window.confirm(`Delete automation ${automationId}? This action cannot be undone.`)) {
+            return;
+          }
+
+          await withDeviceActionLock(deviceId, async () => {
+            await api(`/api/v1/admin/automations/${encodeURIComponent(automationId)}`, {
+              method: "DELETE"
+            });
+            log(`Automation deleted: device=${deviceId} automation=${automationId}`);
             await loadAutomationTesting(deviceId, { force: true });
           });
           return;

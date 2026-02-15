@@ -36,6 +36,10 @@ function buildRelayNames(relayCount: number): string[] {
   return Array.from({ length: relayCount }, (_, idx) => `Relay ${idx + 1}`);
 }
 
+function buildUnclaimedName(hardwareUid: string): string {
+  return `Hexa mini Switch ${hardwareUid}`;
+}
+
 function defaultCapabilities(
   deviceClass: "relay_controller" | "ir_hub" | "sensor_hub" | "hybrid",
   relayCount: number
@@ -178,7 +182,7 @@ export async function provisionRoutes(server: FastifyInstance): Promise<void> {
             payload.firmware_version ?? null,
             payload.button_count,
             payload.relay_count,
-            `Unclaimed ${hardwareUid}`,
+            buildUnclaimedName(hardwareUid),
             claimCode,
             claimCode ? now : null,
             now,
@@ -218,7 +222,7 @@ export async function provisionRoutes(server: FastifyInstance): Promise<void> {
           deviceId,
           deviceUid,
           hardwareUid,
-          `Unclaimed ${hardwareUid}`,
+          buildUnclaimedName(hardwareUid),
           tokenHash,
           payload.model,
           payload.device_class,

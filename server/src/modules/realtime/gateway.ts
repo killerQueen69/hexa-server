@@ -1953,7 +1953,17 @@ function handleDeviceSocket(
   url: URL
 ): void {
   const uid = url.searchParams.get("uid")?.trim();
-  const token = url.searchParams.get("token")?.trim();
+  let token = url.searchParams.get("token")?.trim();
+  if (!token) {
+    const rawAuthHeader = req.headers.authorization;
+    const authHeader = Array.isArray(rawAuthHeader) ? rawAuthHeader[0] : rawAuthHeader;
+    if (typeof authHeader === "string") {
+      const match = authHeader.match(/^Bearer\s+(.+)$/i);
+      if (match && match[1]) {
+        token = match[1].trim();
+      }
+    }
+  }
 
   if (!uid || !token) {
     socket.close(1008, "missing_credentials");
@@ -2078,11 +2088,6 @@ function handleDeviceSocket(
     if (!authenticated || !deviceUid || !deviceId) {
       return;
     }
-
-    // Some embedded clients may not surface explicit pong frames reliably.
-    // Treat any inbound device frame as proof of liveness.
-    alive = true;
-    missedPongs = 0;
 
     const parsed = parseMessage(raw);
     if (!parsed || typeof parsed !== "object") {
