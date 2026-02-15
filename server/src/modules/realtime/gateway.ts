@@ -1174,7 +1174,12 @@ async function sendOtaControlCommand(params: {
 }
 
 async function updateLastSeen(deviceId: string, ip: string): Promise<void> {
-  await updateLastSeenAndFirmware(deviceId, ip, null);
+  await query(
+    `UPDATE devices
+     SET last_seen_at = $1, last_ip = $2, updated_at = $1
+     WHERE id = $3`,
+    [nowIso(), ip, deviceId]
+  );
 }
 
 function normalizeReportedFirmwareVersion(value: unknown): string | null {
@@ -1189,18 +1194,25 @@ function normalizeReportedFirmwareVersion(value: unknown): string | null {
 }
 
 async function updateLastSeenAndFirmware(deviceId: string, ip: string, firmwareVersion: string | null): Promise<void> {
-  await query(
-    `UPDATE devices
-     SET last_seen_at = $1,
-         last_ip = $2,
-         firmware_version = CASE
-           WHEN $4 IS NOT NULL THEN $4
-           ELSE firmware_version
-         END,
-         updated_at = $1
-     WHERE id = $3`,
-    [nowIso(), ip, deviceId, firmwareVersion]
-  );
+  if (!firmwareVersion) {
+    await updateLastSeen(deviceId, ip);
+    return;
+  }
+
+  try {
+    await query(
+      `UPDATE devices
+       SET last_seen_at = $1,
+           last_ip = $2,
+           firmware_version = $4,
+           updated_at = $1
+       WHERE id = $3`,
+      [nowIso(), ip, deviceId, firmwareVersion]
+    );
+  } catch {
+    // Keep WS session healthy even if firmware_version column is unavailable.
+    await updateLastSeen(deviceId, ip);
+  }
 }
 
 async function upsertRelaySnapshot(params: {
