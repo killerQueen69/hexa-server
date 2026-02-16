@@ -631,7 +631,7 @@
       <section class="card panel" data-card-id="devices">
         <div class="section-title">
           <h2>Devices</h2>
-          <div class="meta">Relay controls, ownership, token rotation</div>
+          <div class="meta">Relay + IR controls, ownership, token rotation</div>
         </div>
         <div class="row">
           <input id="claimCodeInput" placeholder="claim code (current logged user)" style="max-width: 250px;" />
@@ -774,6 +774,8 @@
       deviceSearchQuery: "",
       pendingDeviceActions: new Map(),
       automationTestingByDevice: new Map(),
+      irCodesByDevice: new Map(),
+      irLastResultByDevice: new Map(),
       pendingRealtimeCommands: new Map(),
       realtimeSocket: null,
       realtimeAuthed: false,
@@ -2161,6 +2163,8 @@
       state.refreshToken = "";
       state.preferences = null;
       state.automationTestingByDevice.clear();
+      state.irCodesByDevice.clear();
+      state.irLastResultByDevice.clear();
       persistSession();
     }
 
@@ -3046,6 +3050,352 @@
       return `<div class="button-state-grid">${chips.join("")}</div>`;
     }
 
+    function asCapabilitySummaryList(value) {
+      if (!Array.isArray(value)) {
+        return [];
+      }
+      const out = [];
+      for (const item of value) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) {
+          continue;
+        }
+        const key = typeof item.key === "string" ? item.key : "";
+        const kind = typeof item.kind === "string" ? item.kind : "";
+        if (!key || !kind) {
+          continue;
+        }
+        out.push({
+          key,
+          kind,
+          enabled: item.enabled !== false
+        });
+      }
+      return out;
+    }
+
+    function isIrCapableDevice(device) {
+      if (!device || typeof device !== "object") {
+        return false;
+      }
+      if (device.device_class === "ir_hub" || device.device_class === "hybrid") {
+        return true;
+      }
+      const capabilities = asCapabilitySummaryList(device.capabilities);
+      return capabilities.some(
+        (item) =>
+          item.enabled &&
+          (item.key === "ir_tx" || item.key === "ir_rx" || item.kind === "infrared")
+      );
+    }
+
+    function getIrCodeCache(deviceId) {
+      const key = String(deviceId || "").trim();
+      const cached = state.irCodesByDevice.get(key);
+      if (!cached || typeof cached !== "object") {
+        return {
+          loading: false,
+          loadedAt: "",
+          error: "",
+          codes: [],
+          selectedCodeId: ""
+        };
+      }
+      return {
+        loading: cached.loading === true,
+        loadedAt: typeof cached.loadedAt === "string" ? cached.loadedAt : "",
+        error: typeof cached.error === "string" ? cached.error : "",
+        codes: Array.isArray(cached.codes) ? cached.codes : [],
+        selectedCodeId: typeof cached.selectedCodeId === "string" ? cached.selectedCodeId : ""
+      };
+    }
+
+    function setIrCodeSelection(deviceId, codeId) {
+      const key = String(deviceId || "").trim();
+      if (!key) {
+        return;
+      }
+      const cached = getIrCodeCache(key);
+      state.irCodesByDevice.set(key, {
+        ...cached,
+        selectedCodeId: String(codeId || "").trim()
+      });
+    }
+
+    function getIrLastResult(deviceId) {
+      const key = String(deviceId || "").trim();
+      const cached = state.irLastResultByDevice.get(key);
+      if (!cached || typeof cached !== "object") {
+        return {
+          message: "",
+          level: "info",
+          at: ""
+        };
+      }
+      return {
+        message: typeof cached.message === "string" ? cached.message : "",
+        level: cached.level === "error" ? "error" : "info",
+        at: typeof cached.at === "string" ? cached.at : ""
+      };
+    }
+
+    function setIrLastResult(deviceId, message, level = "info") {
+      const key = String(deviceId || "").trim();
+      if (!key) {
+        return;
+      }
+      state.irLastResultByDevice.set(key, {
+        message: String(message || "").trim(),
+        level: level === "error" ? "error" : "info",
+        at: nowIso()
+      });
+      renderDevices(state.devices);
+    }
+
+    async function loadIrCodesForDevice(deviceId, options = {}) {
+      const key = String(deviceId || "").trim();
+      if (!key) {
+        return [];
+      }
+
+      const force = options.force === true;
+      const shouldRender = options.render !== false;
+      const cached = getIrCodeCache(key);
+      if (!force && cached.loading) {
+        return cached.codes;
+      }
+
+      state.irCodesByDevice.set(key, {
+        ...cached,
+        loading: true,
+        error: ""
+      });
+      if (shouldRender) {
+        renderDevices(state.devices);
+      }
+
+      try {
+        const rows = await api(`/api/v1/devices/${encodeURIComponent(key)}/ir-codes`, { method: "GET" });
+        const codes = Array.isArray(rows) ? rows : [];
+        const selectedCodeId = codes.some((entry) => entry && entry.id === cached.selectedCodeId)
+          ? cached.selectedCodeId
+          : typeof codes[0]?.id === "string"
+            ? codes[0].id
+            : "";
+
+        state.irCodesByDevice.set(key, {
+          loading: false,
+          loadedAt: nowIso(),
+          error: "",
+          codes,
+          selectedCodeId
+        });
+        return codes;
+      } catch (error) {
+        state.irCodesByDevice.set(key, {
+          ...cached,
+          loading: false,
+          error: error instanceof Error ? error.message : "ir_code_load_failed"
+        });
+        throw error;
+      } finally {
+        if (shouldRender) {
+          renderDevices(state.devices);
+        }
+      }
+    }
+
+    function findDeviceCardElement(deviceId) {
+      const key = String(deviceId || "").trim();
+      if (!key) {
+        return null;
+      }
+      const cards = document.querySelectorAll(".device-card");
+      for (const card of cards) {
+        if (card instanceof HTMLElement && card.getAttribute("data-device-id") === key) {
+          return card;
+        }
+      }
+      return null;
+    }
+
+    function collectIrCandidateFromCard(card) {
+      const protocolEl = card.querySelector("[data-ir-candidate-protocol]");
+      const payloadEl = card.querySelector("[data-ir-candidate-payload]");
+      const frequencyEl = card.querySelector("[data-ir-candidate-frequency]");
+      const formatEl = card.querySelector("[data-ir-candidate-format]");
+      const brandHintEl = card.querySelector("[data-ir-candidate-brand]");
+      const modelHintEl = card.querySelector("[data-ir-candidate-model]");
+
+      const protocol = protocolEl instanceof HTMLInputElement ? protocolEl.value.trim() : "";
+      const payload = payloadEl instanceof HTMLTextAreaElement ? payloadEl.value.trim() : "";
+      const frequencyRaw = frequencyEl instanceof HTMLInputElement ? frequencyEl.value.trim() : "";
+      const payloadFormat = formatEl instanceof HTMLInputElement ? formatEl.value.trim() : "";
+      const brandHint = brandHintEl instanceof HTMLInputElement ? brandHintEl.value.trim() : "";
+      const modelHint = modelHintEl instanceof HTMLInputElement ? modelHintEl.value.trim() : "";
+
+      const hasAny =
+        Boolean(protocol) ||
+        Boolean(payload) ||
+        Boolean(frequencyRaw) ||
+        Boolean(payloadFormat) ||
+        Boolean(brandHint) ||
+        Boolean(modelHint);
+      if (!hasAny) {
+        return null;
+      }
+      if (!protocol || !payload) {
+        throw new Error("Candidate protocol and payload are required.");
+      }
+
+      const candidate = {
+        protocol,
+        payload
+      };
+
+      if (frequencyRaw) {
+        const frequency = Number(frequencyRaw);
+        if (!Number.isInteger(frequency) || frequency <= 0) {
+          throw new Error("Candidate frequency must be a positive integer.");
+        }
+        candidate.frequency_hz = frequency;
+      }
+      if (payloadFormat) {
+        candidate.payload_format = payloadFormat;
+      }
+      if (brandHint) {
+        candidate.brand_hint = brandHint;
+      }
+      if (modelHint) {
+        candidate.model_hint = modelHint;
+      }
+
+      return candidate;
+    }
+
+    function collectIrTopNFromCard(card) {
+      const topNEl = card.querySelector("[data-ir-top-n]");
+      const topNRaw = topNEl instanceof HTMLInputElement ? topNEl.value.trim() : "";
+      if (!topNRaw) {
+        return undefined;
+      }
+      const topN = Number(topNRaw);
+      if (!Number.isInteger(topN) || topN < 1 || topN > 20) {
+        throw new Error("Top N must be an integer between 1 and 20.");
+      }
+      return topN;
+    }
+
+    function renderIrControls(device, isOwner) {
+      const deviceId = String(device?.id || "").trim();
+      const cache = getIrCodeCache(deviceId);
+      const canControl = Boolean(isOwner);
+      const disabled = canControl ? "" : "disabled";
+      const hasCodes = cache.codes.length > 0;
+      const selectedCodeId = cache.codes.some((entry) => entry && entry.id === cache.selectedCodeId)
+        ? cache.selectedCodeId
+        : typeof cache.codes[0]?.id === "string"
+          ? cache.codes[0].id
+          : "";
+      const loadedAt = cache.loadedAt ? formatIsoWithOffset(cache.loadedAt) : "-";
+      const lastResult = getIrLastResult(deviceId);
+      const lastResultAt = lastResult.at ? formatIsoWithOffset(lastResult.at) : "-";
+
+      const options = hasCodes
+        ? cache.codes.map((code) => {
+            const codeId = typeof code?.id === "string" ? code.id : "";
+            const codeName = typeof code?.code_name === "string" ? code.code_name : codeId;
+            const protocol = typeof code?.protocol === "string" ? code.protocol : "-";
+            const selected = codeId && codeId === selectedCodeId ? "selected" : "";
+            return `<option value="${escapeHtml(codeId)}" ${selected}>${escapeHtml(codeName)} (${escapeHtml(protocol)})</option>`;
+          }).join("")
+        : `<option value="">No IR codes loaded</option>`;
+
+      return `
+        <section class="device-block">
+          <div class="device-block-title">IR Controls</div>
+
+          <div class="grid cols-2">
+            <div>
+              <label>Learn Type</label>
+              <select data-ir-learn-type ${disabled}>
+                <option value="button">button</option>
+                <option value="ac">ac</option>
+              </select>
+            </div>
+            <div>
+              <label>Code Name</label>
+              <input data-ir-code-name placeholder="power_toggle" ${disabled} />
+            </div>
+          </div>
+
+          <div class="device-action-row">
+            <button data-ir-action="learn_start" data-ir-device="${escapeHtml(deviceId)}" ${disabled}>Learn Start</button>
+            <button data-ir-action="learn_test" data-ir-device="${escapeHtml(deviceId)}" class="secondary" ${disabled}>Learn Test</button>
+            <button data-ir-action="learn_save" data-ir-device="${escapeHtml(deviceId)}" class="secondary" ${disabled}>Learn Save</button>
+            <button data-ir-action="learn_discard" data-ir-device="${escapeHtml(deviceId)}" class="warn" ${disabled}>Learn Discard</button>
+          </div>
+
+          <div class="grid cols-2">
+            <div>
+              <label>Stored IR Codes</label>
+              <select data-ir-code-select="${escapeHtml(deviceId)}" ${disabled}>
+                ${options}
+              </select>
+            </div>
+            <div>
+              <label>Candidate Top N</label>
+              <input data-ir-top-n type="number" min="1" max="20" value="5" ${disabled} />
+            </div>
+          </div>
+
+          <div class="device-action-row">
+            <button data-ir-action="send_code" data-ir-device="${escapeHtml(deviceId)}" ${!canControl || !hasCodes ? "disabled" : ""}>Send Code</button>
+            <button data-ir-action="delete_code" data-ir-device="${escapeHtml(deviceId)}" class="danger" ${!canControl || !hasCodes ? "disabled" : ""}>Delete Code</button>
+            <button data-ir-action="load_codes" data-ir-device="${escapeHtml(deviceId)}" class="ghost" ${disabled}>${cache.loading ? "Loading..." : "Refresh Codes"}</button>
+          </div>
+
+          <div class="grid cols-3">
+            <div>
+              <label>Candidate Protocol</label>
+              <input data-ir-candidate-protocol placeholder="NEC" ${disabled} />
+            </div>
+            <div>
+              <label>Candidate Frequency (Hz)</label>
+              <input data-ir-candidate-frequency type="number" min="1" step="1" placeholder="38000" ${disabled} />
+            </div>
+            <div>
+              <label>Candidate Format</label>
+              <input data-ir-candidate-format placeholder="raw" ${disabled} />
+            </div>
+            <div>
+              <label>Brand Hint</label>
+              <input data-ir-candidate-brand placeholder="Samsung" ${disabled} />
+            </div>
+            <div>
+              <label>Model Hint</label>
+              <input data-ir-candidate-model placeholder="TV-1234" ${disabled} />
+            </div>
+          </div>
+
+          <div>
+            <label>Candidate Payload</label>
+            <textarea data-ir-candidate-payload placeholder="raw timings or encoded IR payload" ${disabled}></textarea>
+          </div>
+
+          <div class="device-action-row">
+            <button data-ir-action="recognize_candidate" data-ir-device="${escapeHtml(deviceId)}" class="secondary" ${disabled}>Recognize Candidate</button>
+          </div>
+
+          <div class="meta">codes: ${escapeHtml(cache.codes.length)} | loaded: ${escapeHtml(loadedAt)}</div>
+          <div class="meta" ${lastResult.level === "error" ? 'style="color: var(--danger);"' : ""}>
+            last_ir: ${escapeHtml(lastResult.message || "No IR action yet")} | at: ${escapeHtml(lastResultAt)}
+          </div>
+          ${cache.error ? `<div class="meta" style="color: var(--danger);">${escapeHtml(cache.error)}</div>` : ""}
+          ${canControl ? "" : `<div class="meta">Only owner/admin can run IR commands.</div>`}
+        </section>
+      `;
+    }
+
     function deviceMatchesSearch(device, query) {
       if (!query) {
         return true;
@@ -3105,6 +3455,8 @@
         const cardKey = String(d.id || d.device_uid || "");
         const isCollapsed = Boolean(state.collapsedDeviceCards[cardKey]);
         const isOwner = currentUserOwnsDevice(d);
+        const irCapable = isIrCapableDevice(d);
+        const showRelayControls = d.device_class !== "ir_hub";
         const relayNames = Array.isArray(d.relay_names) ? d.relay_names : [];
         const relayRows = Array.isArray(d.relays) && d.relays.length > 0
           ? d.relays
@@ -3140,6 +3492,48 @@
         const connectivityEditor = buildConnectivityEditor(d);
         const connectivityConfig = normalizedConnectivityConfig(d);
         const buttonStates = renderButtonStates(d);
+        const mainControlSections = [];
+
+        if (showRelayControls) {
+          mainControlSections.push(`
+            <section class="device-block">
+              <div class="device-block-title">Relay Controls</div>
+              <div class="relay-grid">
+                ${relayControls || '<div class="muted">No relay channels reported.</div>'}
+              </div>
+              <div class="device-action-row">
+                <button data-relay-all="${escapeHtml(d.id)}:on">All ON</button>
+                <button data-relay-all="${escapeHtml(d.id)}:off" class="secondary">All OFF</button>
+              </div>
+            </section>
+          `);
+        }
+
+        if (irCapable) {
+          mainControlSections.push(renderIrControls(d, isOwner));
+        }
+
+        mainControlSections.push(`
+          <section class="device-block">
+            <div class="device-block-title">Button Mapping</div>
+            ${buttonStates}
+            ${admin ? inputEditor : '<div class="muted">Button mapping edit is admin only.</div>'}
+            ${admin ? `
+            <div class="device-action-row">
+              <button data-save-io="${escapeHtml(d.id)}" class="secondary">Save I/O</button>
+            </div>` : ""}
+          </section>
+        `);
+
+        mainControlSections.push(`
+          <section class="device-block">
+            <div class="device-block-title">Connectivity Mode</div>
+            ${connectivityEditor}
+            <div class="device-action-row">
+              <button data-save-conn="${escapeHtml(d.id)}" class="secondary" ${(admin || d.is_owner) ? "" : "disabled"}>Save Connectivity</button>
+            </div>
+          </section>
+        `);
 
         const wsOnline = typeof d.ws_online === "boolean" ? d.ws_online : null;
         const online = wsOnline === null
@@ -3201,34 +3595,7 @@
               </div>
 
               <div class="device-main-grid">
-                <section class="device-block">
-                  <div class="device-block-title">Relay Controls</div>
-                  <div class="relay-grid">
-                    ${relayControls || '<div class="muted">No relay channels reported.</div>'}
-                  </div>
-                  <div class="device-action-row">
-                    <button data-relay-all="${escapeHtml(d.id)}:on">All ON</button>
-                    <button data-relay-all="${escapeHtml(d.id)}:off" class="secondary">All OFF</button>
-                  </div>
-                </section>
-
-                <section class="device-block">
-                  <div class="device-block-title">Button Mapping</div>
-                  ${buttonStates}
-                  ${admin ? inputEditor : '<div class="muted">Button mapping edit is admin only.</div>'}
-                  ${admin ? `
-                  <div class="device-action-row">
-                    <button data-save-io="${escapeHtml(d.id)}" class="secondary">Save I/O</button>
-                  </div>` : ""}
-                </section>
-
-                <section class="device-block">
-                  <div class="device-block-title">Connectivity Mode</div>
-                  ${connectivityEditor}
-                  <div class="device-action-row">
-                    <button data-save-conn="${escapeHtml(d.id)}" class="secondary" ${(admin || d.is_owner) ? "" : "disabled"}>Save Connectivity</button>
-                  </div>
-                </section>
+                ${mainControlSections.join("")}
               </div>
 
               <div class="device-footer-grid">
@@ -3440,9 +3807,36 @@
           state.automationTestingByDevice.delete(cachedDeviceId);
         }
       }
+      for (const cachedDeviceId of state.irCodesByDevice.keys()) {
+        if (!knownDeviceIds.has(cachedDeviceId)) {
+          state.irCodesByDevice.delete(cachedDeviceId);
+        }
+      }
+      for (const cachedDeviceId of state.irLastResultByDevice.keys()) {
+        if (!knownDeviceIds.has(cachedDeviceId)) {
+          state.irLastResultByDevice.delete(cachedDeviceId);
+        }
+      }
 
       state.devices = devices;
       renderDevices(devices);
+
+      for (const device of devices) {
+        if (!device || typeof device.id !== "string") {
+          continue;
+        }
+        if (!isIrCapableDevice(device) || !currentUserOwnsDevice(device)) {
+          continue;
+        }
+        const cache = getIrCodeCache(device.id);
+        if (cache.loading || cache.loadedAt || cache.codes.length > 0 || cache.error) {
+          continue;
+        }
+        void loadIrCodesForDevice(device.id, { force: true }).catch((error) => {
+          const message = error instanceof Error ? error.message : "ir_code_load_failed";
+          log(`IR code preload failed: ${device.id} ${message}`);
+        });
+      }
     }
 
     async function loadOta() {
@@ -3801,36 +4195,54 @@
 
     $("devicesTable").addEventListener("click", async (event) => {
       const target = event.target;
-      if (!(target instanceof HTMLElement)) return;
+      if (!(target instanceof Element)) return;
 
-      const deviceCollapse = target.getAttribute("data-device-collapse");
-      const relayCmd = target.getAttribute("data-relay");
-      const relayAll = target.getAttribute("data-relay-all");
-      const saveIo = target.getAttribute("data-save-io");
-      const saveConn = target.getAttribute("data-save-conn");
-      const rotateToken = target.getAttribute("data-rotate-token");
-      const releaseDevice = target.getAttribute("data-release-device");
-      const deleteDevice = target.getAttribute("data-delete-device");
-      const claimCode = target.getAttribute("data-claim-code");
-      const deviceReboot = target.getAttribute("data-device-reboot");
-      const deviceFactoryReset = target.getAttribute("data-device-factory-reset");
-      const otaCheck = target.getAttribute("data-ota-check");
-      const otaInstall = target.getAttribute("data-ota-install");
-      const wifiSet = target.getAttribute("data-wifi-set");
-      const wifiClear = target.getAttribute("data-wifi-clear");
-      const loadAutomationTests = target.getAttribute("data-load-automation-tests");
-      const runAutomationNow = target.getAttribute("data-run-automation-now");
-      const deleteAutomation = target.getAttribute("data-delete-automation");
-      const runScheduleNow = target.getAttribute("data-run-schedule-now");
-      const createAutomation = target.getAttribute("data-create-automation");
-      const createSchedule = target.getAttribute("data-create-schedule");
+      const getActionAttr = (name) => {
+        const el = target.closest(`[${name}]`);
+        return el instanceof Element ? el.getAttribute(name) : null;
+      };
+
+      const collapseEl = target.closest("[data-device-collapse]");
+      const deviceCollapse = collapseEl instanceof Element ? collapseEl.getAttribute("data-device-collapse") : null;
+      const relayCmd = getActionAttr("data-relay");
+      const relayAll = getActionAttr("data-relay-all");
+      const saveIo = getActionAttr("data-save-io");
+      const saveConn = getActionAttr("data-save-conn");
+      const rotateToken = getActionAttr("data-rotate-token");
+      const releaseDevice = getActionAttr("data-release-device");
+      const deleteDevice = getActionAttr("data-delete-device");
+      const claimCode = getActionAttr("data-claim-code");
+      const deviceReboot = getActionAttr("data-device-reboot");
+      const deviceFactoryReset = getActionAttr("data-device-factory-reset");
+      const otaCheck = getActionAttr("data-ota-check");
+      const otaInstall = getActionAttr("data-ota-install");
+      const wifiSet = getActionAttr("data-wifi-set");
+      const wifiClear = getActionAttr("data-wifi-clear");
+      const irAction = getActionAttr("data-ir-action");
+      const irDeviceId = getActionAttr("data-ir-device");
+      const loadAutomationTests = getActionAttr("data-load-automation-tests");
+      const runAutomationNow = getActionAttr("data-run-automation-now");
+      const deleteAutomation = getActionAttr("data-delete-automation");
+      const runScheduleNow = getActionAttr("data-run-schedule-now");
+      const createAutomation = getActionAttr("data-create-automation");
+      const createSchedule = getActionAttr("data-create-schedule");
 
       try {
         if (deviceCollapse) {
           const nextCollapsed = !Boolean(state.collapsedDeviceCards[deviceCollapse]);
           state.collapsedDeviceCards[deviceCollapse] = nextCollapsed;
           persistCollapsedDeviceCards();
-          renderDevices(state.devices);
+          const card = collapseEl instanceof Element ? collapseEl.closest(".device-card") : null;
+          if (card instanceof HTMLElement) {
+            const body = card.querySelector(".device-card-body");
+            if (body instanceof HTMLElement) {
+              body.hidden = nextCollapsed;
+            }
+            card.classList.toggle("is-collapsed", nextCollapsed);
+          }
+          if (collapseEl instanceof HTMLElement) {
+            collapseEl.textContent = nextCollapsed ? "Expand" : "Collapse";
+          }
           return;
         }
 
@@ -3997,6 +4409,130 @@
             );
             await loadDevices();
             await loadAutomationTesting(deviceId, { force: true });
+          });
+          return;
+        }
+
+        if (irAction && irDeviceId) {
+          const deviceId = irDeviceId;
+          const action = irAction.trim().toLowerCase();
+          const device = state.devices.find((item) => item && item.id === deviceId);
+          if (!device) {
+            throw new Error("Device not found in dashboard state.");
+          }
+          if (!isIrCapableDevice(device)) {
+            throw new Error("Device is not IR capable.");
+          }
+          if (!currentUserOwnsDevice(device)) {
+            throw new Error("forbidden: Only owner/admin can send IR commands.");
+          }
+
+          if (action === "load_codes") {
+            await withDeviceActionLock(deviceId, async () => {
+              const codes = await loadIrCodesForDevice(deviceId, { force: true });
+              log(`IR code list refreshed: ${deviceId} count=${codes.length}`);
+              setIrLastResult(deviceId, `Code list refreshed (${codes.length})`);
+            });
+            return;
+          }
+
+          const card = target.closest(".device-card") || findDeviceCardElement(deviceId);
+          if (!(card instanceof HTMLElement)) {
+            throw new Error("Device card context not found.");
+          }
+
+          const learnTypeEl = card.querySelector("[data-ir-learn-type]");
+          const learnTypeRaw = learnTypeEl instanceof HTMLSelectElement ? learnTypeEl.value.trim().toLowerCase() : "";
+          const learnType = learnTypeRaw === "ac" ? "ac" : "button";
+          const codeNameEl = card.querySelector("[data-ir-code-name]");
+          const codeName = codeNameEl instanceof HTMLInputElement ? codeNameEl.value.trim() : "";
+          const selectEl = card.querySelector("[data-ir-code-select]");
+          const selectedCodeId = selectEl instanceof HTMLSelectElement ? selectEl.value.trim() : "";
+          if (selectedCodeId) {
+            setIrCodeSelection(deviceId, selectedCodeId);
+          }
+          const cache = getIrCodeCache(deviceId);
+          const selectedCode = cache.codes.find((entry) => entry && entry.id === selectedCodeId) || null;
+          const selectedCodeName =
+            selectedCode && typeof selectedCode.code_name === "string" ? selectedCode.code_name : "";
+
+          const commandPayload = {
+            device_id: deviceId,
+            scope: "ir",
+            operation: action
+          };
+
+          if (action === "learn_start") {
+            commandPayload.learn_type = learnType;
+            if (codeName) {
+              commandPayload.code_name = codeName;
+            }
+          } else if (action === "learn_test") {
+            // no-op, command payload already contains operation
+          } else if (action === "learn_save") {
+            commandPayload.learn_type = learnType;
+            if (codeName) {
+              commandPayload.code_name = codeName;
+            }
+            const candidate = collectIrCandidateFromCard(card);
+            if (candidate) {
+              commandPayload.candidate = candidate;
+            }
+          } else if (action === "learn_discard") {
+            // no-op, command payload already contains operation
+          } else if (action === "send_code" || action === "delete_code") {
+            if (selectedCodeId) {
+              commandPayload.code_id = selectedCodeId;
+            } else if (selectedCodeName) {
+              commandPayload.code_name = selectedCodeName;
+            } else if (codeName) {
+              commandPayload.code_name = codeName;
+            } else {
+              throw new Error("Select a stored code or provide a code name.");
+            }
+          } else if (action === "recognize_candidate") {
+            const candidate = collectIrCandidateFromCard(card);
+            if (!candidate) {
+              throw new Error("Candidate protocol and payload are required for recognize.");
+            }
+            commandPayload.candidate = candidate;
+            const topN = collectIrTopNFromCard(card);
+            if (typeof topN === "number") {
+              commandPayload.top_n = topN;
+            }
+          } else {
+            throw new Error(`Unsupported IR action: ${action}`);
+          }
+
+          await withDeviceActionLock(deviceId, async () => {
+            const result = await sendRealtimeCommand(commandPayload, { timeoutMs: 22000 });
+            if (action === "recognize_candidate") {
+              const matches = Array.isArray(result?.matches) ? result.matches : [];
+              const top = matches[0] && typeof matches[0] === "object" ? matches[0] : null;
+              const topLabel = top
+                ? `${top.code_name || top.code_id || top.library_record_id || "unknown"}${
+                  Number.isFinite(Number(top.score)) ? ` score=${Number(top.score).toFixed(3)}` : ""
+                }`
+                : "none";
+              log(`IR recognize: ${deviceId} matches=${matches.length} top=${topLabel}`);
+              setIrLastResult(deviceId, `Recognize matches=${matches.length} top=${topLabel}`);
+              return;
+            }
+
+            const resultCodeName = typeof result?.code_name === "string" ? result.code_name : "";
+            const resultCodeId = typeof result?.code_id === "string" ? result.code_id : "";
+            log(
+              `IR command sent: ${deviceId} ${action}` +
+              `${resultCodeName ? ` code=${resultCodeName}` : resultCodeId ? ` code_id=${resultCodeId}` : ""}`
+            );
+            setIrLastResult(
+              deviceId,
+              `${action}${resultCodeName ? ` code=${resultCodeName}` : resultCodeId ? ` code_id=${resultCodeId}` : ""}`
+            );
+
+            if (action === "learn_save" || action === "delete_code") {
+              await loadIrCodesForDevice(deviceId, { force: true });
+            }
           });
           return;
         }
@@ -4254,13 +4790,24 @@
           return;
         }
       } catch (error) {
-        log(`Device action failed: ${error.message}`);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (irAction && irDeviceId) {
+          setIrLastResult(irDeviceId, `Error: ${errorMessage}`, "error");
+        }
+        log(`Device action failed: ${errorMessage}`);
       }
     });
 
     $("devicesTable").addEventListener("change", (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
+
+      const irCodeSelectKey = target.getAttribute("data-ir-code-select");
+      if (irCodeSelectKey) {
+        const codeId = target instanceof HTMLSelectElement ? target.value : "";
+        setIrCodeSelection(irCodeSelectKey, codeId);
+        return;
+      }
 
       const typeKey = target.getAttribute("data-io-type");
       if (typeKey) {
