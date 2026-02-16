@@ -3015,16 +3015,37 @@ function handleDeviceSocket(
 
         const messageMeta = asObject(message.metadata);
         const candidateRaw = asRecord(message.candidate) ?? asRecord(message);
-        const candidateProtocol =
-          typeof candidateRaw?.protocol === "string" ? candidateRaw.protocol.trim() : "";
-        const candidatePayload =
-          typeof candidateRaw?.payload === "string" ? candidateRaw.payload : "";
+        const candidateProtocol = (() => {
+          const protocol =
+            typeof candidateRaw?.protocol === "string"
+              ? candidateRaw.protocol.trim()
+              : typeof candidateRaw?.proto === "string"
+                ? candidateRaw.proto.trim()
+                : "";
+          return protocol;
+        })();
+        const candidatePayload = (() => {
+          if (typeof candidateRaw?.payload === "string") {
+            return candidateRaw.payload;
+          }
+          if (typeof candidateRaw?.raw === "string") {
+            return candidateRaw.raw;
+          }
+          if (typeof candidateRaw?.raw_csv === "string") {
+            return candidateRaw.raw_csv;
+          }
+          return "";
+        })();
         const candidateFrequency =
           typeof candidateRaw?.frequency_hz === "number" && Number.isInteger(candidateRaw.frequency_hz)
             ? candidateRaw.frequency_hz
             : null;
         const candidatePayloadFormat =
-          typeof candidateRaw?.payload_format === "string" ? candidateRaw.payload_format : "raw";
+          typeof candidateRaw?.payload_format === "string"
+            ? candidateRaw.payload_format
+            : typeof candidateRaw?.format === "string"
+              ? candidateRaw.format
+              : "raw";
 
         if (type === "ir_learn_candidate" && candidateProtocol && candidatePayload && env.IR_AUTOREC_ENABLED) {
           const normalizedCandidate = normalizeIrPayload({
@@ -3072,11 +3093,13 @@ function handleDeviceSocket(
           (type === "ir_learn_state" && learnState === "saved");
         if (shouldPersistLearnedCode && candidateProtocol && candidatePayload) {
           const codeNameRaw =
-            typeof message.code_name === "string"
+            typeof message.code_name === "string" && message.code_name.trim().length > 0
               ? message.code_name
-              : typeof candidateRaw?.code_name === "string"
+              : typeof candidateRaw?.code_name === "string" && candidateRaw.code_name.trim().length > 0
                 ? candidateRaw.code_name
-                : `learned-${nowIso()}`;
+                : typeof message.name === "string" && message.name.trim().length > 0
+                  ? message.name
+                  : `learned-${nowIso()}`;
 
           const savedCode = await upsertDeviceIrCode({
             deviceId,
@@ -3108,7 +3131,13 @@ function handleDeviceSocket(
         });
 
         broadcastDeviceEvent(owner, outbound);
-      })().catch(() => undefined);
+      })().catch((error) => {
+        const errorMessage =
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : "unknown_ir_event_error";
+        console.warn(`[GW] IR event processing failed uid=${deviceUid} type=${type} err=${errorMessage}`);
+      });
       return;
     }
 
