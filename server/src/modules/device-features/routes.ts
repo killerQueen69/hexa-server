@@ -876,10 +876,6 @@ export async function deviceFeatureRoutes(server: FastifyInstance): Promise<void
     if (!device) {
       return sendApiError(reply, 404, "not_found", "Device not found.");
     }
-    if (!hasIrCapability(device)) {
-      return sendApiError(reply, 409, "device_not_ir_capable", "Device does not expose IR capability.");
-    }
-
     try {
       const normalized = normalizeIrPayload({
         protocol: parsed.data.protocol,
@@ -966,9 +962,6 @@ export async function deviceFeatureRoutes(server: FastifyInstance): Promise<void
     });
     if (!device) {
       return sendApiError(reply, 404, "not_found", "Device not found.");
-    }
-    if (!hasIrCapability(device)) {
-      return sendApiError(reply, 409, "device_not_ir_capable", "Device does not expose IR capability.");
     }
     if (Object.keys(parsed.data).length === 0) {
       return sendApiError(reply, 400, "validation_error", "No fields provided for update.");
@@ -1095,10 +1088,6 @@ export async function deviceFeatureRoutes(server: FastifyInstance): Promise<void
     if (!device) {
       return sendApiError(reply, 404, "not_found", "Device not found.");
     }
-    if (!hasIrCapability(device)) {
-      return sendApiError(reply, 409, "device_not_ir_capable", "Device does not expose IR capability.");
-    }
-
     const deleted = await query(
       `DELETE FROM device_ir_codes
        WHERE device_id = $1

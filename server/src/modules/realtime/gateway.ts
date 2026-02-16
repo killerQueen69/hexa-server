@@ -174,7 +174,7 @@ type OtaResolvedRelease = {
     verification_key_id: string;
     next_verification_key_id: string | null;
   };
-  artifactPath: string;
+  artifactPath: string | null;
 };
 
 type DeviceConfigLookupRow = {
@@ -820,6 +820,7 @@ async function resolveOtaReleaseForDevice(params: {
   channel: OtaChannel;
   currentVersion: string | null;
   minimumSecurityVersion: number;
+  requireArtifact: boolean;
 }): Promise<OtaResolvedRelease | null> {
   const releases = await query<OtaReleaseRow>(
     `SELECT
@@ -865,6 +866,18 @@ async function resolveOtaReleaseForDevice(params: {
     }
     if (!verifyManifestSignature(manifest, candidate.signature, verificationKey)) {
       continue;
+    }
+
+    if (!params.requireArtifact) {
+      return {
+        manifest: {
+          ...manifest,
+          signature: candidate.signature,
+          verification_key_id: candidate.verification_key_id,
+          next_verification_key_id: candidate.next_verification_key_id
+        },
+        artifactPath: null
+      };
     }
 
     const artifactKey = artifactKeyFromMetadata(candidate.metadata) ?? artifactKeyFromManifestUrl(manifest.url);
@@ -2481,7 +2494,8 @@ async function sendOtaControlCommand(params: {
     model: row.model,
     channel,
     currentVersion: row.firmware_version,
-    minimumSecurityVersion: asNonNegativeInt(row.ota_security_version)
+    minimumSecurityVersion: asNonNegativeInt(row.ota_security_version),
+    requireArtifact: params.operation === "install"
   });
 
   if (!resolved) {
@@ -2545,7 +2559,7 @@ async function sendOtaControlCommand(params: {
       };
     }
 
-    if (params.operation === "install" && transferId) {
+    if (params.operation === "install" && transferId && resolved.artifactPath) {
       activeOtaStreams.add(row.device_uid);
       void streamOtaArtifactOverWs({
         deviceUid: row.device_uid,
