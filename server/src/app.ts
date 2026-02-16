@@ -27,6 +27,7 @@ import { smartHomeService } from "./services/smart-home-service";
 export function buildApp() {
   const testUiPath = path.resolve(process.cwd(), "public", "test-ui.html");
   const dashboardPath = path.resolve(process.cwd(), "public", "dashboard.html");
+  const dashboardAssetsDir = path.resolve(process.cwd(), "public", "dashboard");
 
   const app = fastify({
     logger: true,
@@ -159,6 +160,50 @@ export function buildApp() {
     } catch {
       reply.code(404).type("text/plain; charset=utf-8");
       return reply.send("dashboard.html not found");
+    }
+  });
+
+  app.get("/dashboard/*", async (request, reply) => {
+    const wildcard = (request.params as { "*": string })["*"] ?? "";
+    const normalized = path.posix.normalize(wildcard).replace(/^\/+/, "");
+    if (!normalized || normalized.includes("..")) {
+      reply.code(404).type("text/plain; charset=utf-8");
+      return reply.send("asset not found");
+    }
+
+    const assetPath = path.resolve(dashboardAssetsDir, ...normalized.split("/"));
+    if (
+      assetPath !== dashboardAssetsDir &&
+      !assetPath.startsWith(`${dashboardAssetsDir}${path.sep}`)
+    ) {
+      reply.code(404).type("text/plain; charset=utf-8");
+      return reply.send("asset not found");
+    }
+
+    try {
+      const content = await readFile(assetPath);
+      const ext = path.extname(assetPath).toLowerCase();
+      if (ext === ".js") {
+        reply.type("text/javascript; charset=utf-8");
+      } else if (ext === ".css") {
+        reply.type("text/css; charset=utf-8");
+      } else if (ext === ".json") {
+        reply.type("application/json; charset=utf-8");
+      } else if (ext === ".svg") {
+        reply.type("image/svg+xml");
+      } else if (ext === ".png") {
+        reply.type("image/png");
+      } else if (ext === ".jpg" || ext === ".jpeg") {
+        reply.type("image/jpeg");
+      } else if (ext === ".webp") {
+        reply.type("image/webp");
+      } else {
+        reply.type("application/octet-stream");
+      }
+      return reply.send(content);
+    } catch {
+      reply.code(404).type("text/plain; charset=utf-8");
+      return reply.send("asset not found");
     }
   });
 
