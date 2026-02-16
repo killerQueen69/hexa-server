@@ -79,6 +79,21 @@ const envSchema = z.object({
   OTA_ARTIFACTS_DIR: z.string().default("./data/ota-artifacts"),
   OTA_UPLOAD_MAX_BYTES: z.coerce.number().int().min(1024).max(268435456).default(8388608),
   OTA_RELEASE_DEFAULT_EXPIRY_HOURS: z.coerce.number().int().min(1).max(8760).default(168),
+  IR_CLOUD_FEATURE_ENABLED: z
+    .string()
+    .optional()
+    .default("true")
+    .transform((value) => value !== "false"),
+  IR_LIBRARY_INGEST_ENABLED: z
+    .string()
+    .optional()
+    .default("false")
+    .transform((value) => value === "true"),
+  IR_AUTOREC_ENABLED: z
+    .string()
+    .optional()
+    .default("false")
+    .transform((value) => value === "true"),
   BACKUP_OUTPUT_DIR: z.string().default("./data/backups"),
   BACKUP_RETENTION_COUNT: z.coerce.number().int().min(1).max(365).default(7),
   BACKUP_ENCRYPTION_KEY: z.string().optional(),

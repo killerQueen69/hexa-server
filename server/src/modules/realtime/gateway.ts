@@ -13,6 +13,11 @@ import { deviceFallbackSyncService } from "../../services/device-fallback-sync-s
 import { type OtaManifestPayload, verifyManifestSignature } from "../../services/ota-manifest-signer";
 import { RelayServiceError, relayService } from "../../services/relay-service";
 import { smartHomeService } from "../../services/smart-home-service";
+import {
+  normalizeIrPayload,
+  rankIrMatches,
+  type IrRankableRecord
+} from "../../services/ir-code-utils";
 import { newId, sha256 } from "../../utils/crypto";
 import { nowIso } from "../../utils/time";
 
@@ -29,12 +34,12 @@ type ClientRelayCommand =
 type ClientWifiCommand =
   | { scope: "wifi"; operation: "clear"; reboot: boolean }
   | {
-      scope: "wifi";
-      operation: "set";
-      ssid: string;
-      password: string;
-      reboot: boolean;
-    };
+    scope: "wifi";
+    operation: "set";
+    ssid: string;
+    password: string;
+    reboot: boolean;
+  };
 
 type ClientDeviceControlCommand = {
   scope: "device";
@@ -75,6 +80,26 @@ type ClientConnectivityModeCommand = {
   mode: ConnectivityMode;
 };
 
+type IrLearnType = "button" | "ac";
+
+type ClientIrCommand = {
+  scope: "ir";
+  operation:
+  | "learn_start"
+  | "learn_test"
+  | "learn_save"
+  | "learn_discard"
+  | "send_code"
+  | "delete_code"
+  | "recognize_candidate";
+  learnType?: IrLearnType;
+  codeId?: string;
+  codeName?: string;
+  candidate?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  topN?: number;
+};
+
 type ClientCommand =
   | ClientRelayCommand
   | ClientWifiCommand
@@ -83,7 +108,8 @@ type ClientCommand =
   | ClientButtonModeCommand
   | ClientButtonLinkCommand
   | ClientHaConfigCommand
-  | ClientConnectivityModeCommand;
+  | ClientConnectivityModeCommand
+  | ClientIrCommand;
 
 type ClientConfigCommand =
   | ClientButtonModeCommand
@@ -161,6 +187,36 @@ type DeviceConfigLookupRow = {
   config: unknown;
 };
 
+type DeviceIrControlLookupRow = {
+  id: string;
+  device_uid: string;
+  owner_user_id: string | null;
+  is_active: boolean;
+  device_class: "relay_controller" | "ir_hub" | "sensor_hub" | "hybrid";
+  capabilities: unknown;
+};
+
+type DeviceIrCodeRow = {
+  id: string;
+  device_id: string;
+  owner_user_id: string | null;
+  code_name: string;
+  protocol: string;
+  protocol_norm: string | null;
+  frequency_hz: number | null;
+  frequency_norm_hz: number | null;
+  payload: string;
+  payload_format: string | null;
+  payload_fingerprint: string | null;
+  source_type: string | null;
+  source_ref: string | null;
+  normalized_payload: unknown;
+  metadata: unknown;
+  learned_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+};
+
 type RawWebSocket = {
   readyState: number;
   OPEN: number;
@@ -195,6 +251,7 @@ const DEVICE_COMMAND_QUEUE_MAX = 40;
 const WIFI_CONFIG_COMMAND_TIMEOUT_MS = 12_000;
 const DEVICE_CONTROL_COMMAND_TIMEOUT_MS = 8_000;
 const OTA_CONTROL_COMMAND_TIMEOUT_MS = 12_000;
+const IR_CONTROL_COMMAND_TIMEOUT_MS = 12_000;
 const OTA_WS_CHUNK_BYTES = 768;
 const OTA_WS_CHUNK_ACK_TIMEOUT_MS = 8_000;
 const WIFI_SSID_MAX_LEN = 32;
@@ -368,6 +425,55 @@ function parseConnectivityMode(raw: unknown): ConnectivityMode | null {
     return "local_mqtt";
   }
   return null;
+}
+
+function parseIrLearnType(raw: unknown): IrLearnType | undefined {
+  if (typeof raw !== "string") {
+    return undefined;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "button" || normalized === "generic") {
+    return "button";
+  }
+  if (normalized === "ac" || normalized === "climate") {
+    return "ac";
+  }
+  return undefined;
+}
+
+function parseIrOperation(raw: unknown): ClientIrCommand["operation"] | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const normalized = raw.trim().toLowerCase();
+  switch (normalized) {
+    case "learn_start":
+    case "learn":
+    case "start":
+      return "learn_start";
+    case "learn_test":
+    case "test":
+      return "learn_test";
+    case "learn_save":
+    case "save":
+      return "learn_save";
+    case "learn_discard":
+    case "discard":
+    case "cancel":
+      return "learn_discard";
+    case "send_code":
+    case "send":
+      return "send_code";
+    case "delete_code":
+    case "delete":
+    case "remove":
+      return "delete_code";
+    case "recognize_candidate":
+    case "recognize":
+      return "recognize_candidate";
+    default:
+      return null;
+  }
 }
 
 function defaultInputConfigRows(buttonCount: number, relayCount: number): InputConfigRow[] {
@@ -1007,6 +1113,691 @@ async function listOwnedDeviceUids(userId: string): Promise<string[]> {
   return result.rows.map((row) => row.device_uid);
 }
 
+function asObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return value as Record<string, unknown>;
+}
+
+function asCapabilitySummary(value: unknown): Array<{
+  key: string;
+  kind: string;
+  enabled: boolean;
+}> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const out: Array<{
+    key: string;
+    kind: string;
+    enabled: boolean;
+  }> = [];
+  for (const item of value) {
+    const record = asRecord(item);
+    if (!record) {
+      continue;
+    }
+    const key = typeof record.key === "string" ? record.key : "";
+    const kind = typeof record.kind === "string" ? record.kind : "";
+    if (!key || !kind) {
+      continue;
+    }
+    out.push({
+      key,
+      kind,
+      enabled: record.enabled !== false
+    });
+  }
+  return out;
+}
+
+function isIrCapableDevice(row: DeviceIrControlLookupRow): boolean {
+  if (row.device_class === "ir_hub" || row.device_class === "hybrid") {
+    return true;
+  }
+  const capabilities = asCapabilitySummary(row.capabilities);
+  return capabilities.some(
+    (item) =>
+      item.enabled &&
+      (item.key === "ir_tx" || item.key === "ir_rx" || item.kind === "infrared")
+  );
+}
+
+async function writeAuditLog(params: {
+  deviceId: string;
+  userId?: string | null;
+  action: string;
+  source: string;
+  details: Record<string, unknown>;
+}): Promise<void> {
+  await query(
+    `INSERT INTO audit_log (
+       id, device_id, user_id, action, details, source, created_at
+     ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+    [
+      newId(),
+      params.deviceId,
+      params.userId ?? null,
+      params.action,
+      JSON.stringify(params.details),
+      params.source,
+      nowIso()
+    ]
+  );
+}
+
+async function upsertDeviceIrCode(params: {
+  deviceId: string;
+  ownerUserId: string | null;
+  codeName: string;
+  protocol: string;
+  frequencyHz: number | null;
+  payload: string;
+  payloadFormat?: string | null;
+  sourceType: "device" | "migration" | "library" | "user";
+  sourceRef?: string | null;
+  metadata: Record<string, unknown>;
+  normalizedPayloadOverride?: Record<string, unknown> | null;
+}): Promise<DeviceIrCodeRow> {
+  const normalized = normalizeIrPayload({
+    protocol: params.protocol,
+    frequencyHz: params.frequencyHz,
+    payload: params.payload,
+    payloadFormat: params.payloadFormat
+  });
+  const normalizedPayloadMerged =
+    params.normalizedPayloadOverride && Object.keys(params.normalizedPayloadOverride).length > 0
+      ? {
+        ...normalized.normalizedPayload,
+        ...params.normalizedPayloadOverride
+      }
+      : normalized.normalizedPayload;
+
+  const saved = await query<DeviceIrCodeRow>(
+    `INSERT INTO device_ir_codes (
+       id, device_id, owner_user_id, code_name, protocol, protocol_norm,
+       frequency_hz, frequency_norm_hz, payload, payload_format, payload_fingerprint,
+       source_type, source_ref, normalized_payload, metadata, learned_at, created_at, updated_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6,
+       $7, $8, $9, $10, $11,
+       $12, $13, $14::jsonb, $15::jsonb, $16, $17, $18
+     )
+     ON CONFLICT (device_id, code_name)
+     DO UPDATE SET
+       owner_user_id = EXCLUDED.owner_user_id,
+       protocol = EXCLUDED.protocol,
+       protocol_norm = EXCLUDED.protocol_norm,
+       frequency_hz = EXCLUDED.frequency_hz,
+       frequency_norm_hz = EXCLUDED.frequency_norm_hz,
+       payload = EXCLUDED.payload,
+       payload_format = EXCLUDED.payload_format,
+       payload_fingerprint = EXCLUDED.payload_fingerprint,
+       source_type = EXCLUDED.source_type,
+       source_ref = EXCLUDED.source_ref,
+       normalized_payload = EXCLUDED.normalized_payload,
+       metadata = EXCLUDED.metadata,
+       learned_at = EXCLUDED.learned_at,
+       updated_at = EXCLUDED.updated_at
+     RETURNING
+       id, device_id, owner_user_id, code_name, protocol, protocol_norm,
+       frequency_hz, frequency_norm_hz, payload, payload_format, payload_fingerprint,
+       source_type, source_ref, normalized_payload, metadata, learned_at, created_at, updated_at`,
+    [
+      newId(),
+      params.deviceId,
+      params.ownerUserId,
+      params.codeName.trim(),
+      params.protocol.trim(),
+      normalized.protocolNorm,
+      params.frequencyHz,
+      normalized.frequencyNormHz,
+      params.payload,
+      normalized.payloadFormat,
+      normalized.payloadFingerprint,
+      params.sourceType,
+      params.sourceRef ?? null,
+      JSON.stringify(normalizedPayloadMerged),
+      JSON.stringify(params.metadata),
+      nowIso(),
+      nowIso(),
+      nowIso()
+    ]
+  );
+
+  return saved.rows[0];
+}
+
+async function loadIrRankRecords(deviceId: string): Promise<IrRankableRecord[]> {
+  const deviceRows = await query<{
+    id: string;
+    code_name: string;
+    protocol_norm: string | null;
+    frequency_norm_hz: number | null;
+    payload_fingerprint: string | null;
+    payload: string;
+    brand: string | null;
+    model: string | null;
+    metadata: unknown;
+  }>(
+    `SELECT
+       id,
+       code_name,
+       protocol_norm,
+       frequency_norm_hz,
+       payload_fingerprint,
+       payload,
+       metadata->>'brand' AS brand,
+       metadata->>'model' AS model,
+       metadata
+     FROM device_ir_codes
+     WHERE device_id = $1`,
+    [deviceId]
+  );
+
+  const libraryRows = await query<{
+    id: string;
+    protocol_norm: string;
+    frequency_norm_hz: number | null;
+    payload_fingerprint: string;
+    payload: string;
+    brand: string | null;
+    model: string | null;
+    metadata: unknown;
+  }>(
+    `SELECT
+       r.id,
+       r.protocol_norm,
+       r.frequency_norm_hz,
+       r.payload_fingerprint,
+       r.payload,
+       r.brand,
+       r.model,
+       r.metadata
+     FROM ir_library_records r
+     INNER JOIN ir_library_sources s ON s.id = r.source_id
+     WHERE s.is_active = TRUE`
+  );
+
+  const out: IrRankableRecord[] = [];
+  for (const row of deviceRows.rows) {
+    const fingerprint = row.payload_fingerprint ?? "";
+    if (!fingerprint) {
+      continue;
+    }
+    out.push({
+      source: "device",
+      codeId: row.id,
+      codeName: row.code_name,
+      libraryRecordId: null,
+      protocolNorm: row.protocol_norm ?? "UNKNOWN",
+      frequencyNormHz: row.frequency_norm_hz,
+      payloadFingerprint: fingerprint,
+      payloadCanonical: row.payload,
+      brand: row.brand,
+      model: row.model,
+      metadata: asObject(row.metadata)
+    });
+  }
+
+  for (const row of libraryRows.rows) {
+    out.push({
+      source: "library",
+      codeId: row.id,
+      codeName: null,
+      libraryRecordId: row.id,
+      protocolNorm: row.protocol_norm,
+      frequencyNormHz: row.frequency_norm_hz,
+      payloadFingerprint: row.payload_fingerprint,
+      payloadCanonical: row.payload,
+      brand: row.brand,
+      model: row.model,
+      metadata: asObject(row.metadata)
+    });
+  }
+
+  return out;
+}
+
+async function sendIrControlCommand(params: {
+  userId: string;
+  role: string;
+  deviceId: string;
+  command: ClientIrCommand;
+  timeoutMs: number;
+}): Promise<
+  | {
+    ok: true;
+    deviceUid: string;
+    latencyMs: number;
+    result?: Record<string, unknown>;
+    commandId?: string;
+  }
+  | {
+    ok: false;
+    code: string;
+    message: string;
+    details?: Record<string, unknown>;
+  }
+> {
+  if (!env.IR_CLOUD_FEATURE_ENABLED) {
+    return {
+      ok: false,
+      code: "feature_disabled",
+      message: "Cloud IR control is disabled."
+    };
+  }
+
+  const isAdminActor = params.role === "admin";
+  const lookup = isAdminActor
+    ? await query<DeviceIrControlLookupRow>(
+      `SELECT
+           id, device_uid, owner_user_id, is_active, device_class, capabilities
+         FROM devices
+         WHERE id = $1
+         LIMIT 1`,
+      [params.deviceId]
+    )
+    : await query<DeviceIrControlLookupRow>(
+      `SELECT
+           id, device_uid, owner_user_id, is_active, device_class, capabilities
+         FROM devices
+         WHERE id = $1
+           AND owner_user_id = $2
+         LIMIT 1`,
+      [params.deviceId, params.userId]
+    );
+  const row = lookup.rows[0];
+  if (!row) {
+    return isAdminActor
+      ? {
+        ok: false,
+        code: "not_found",
+        message: "Device not found."
+      }
+      : {
+        ok: false,
+        code: "forbidden",
+        message: "Only the device owner can control this device."
+      };
+  }
+  if (!row.is_active) {
+    return {
+      ok: false,
+      code: "device_inactive",
+      message: "Device is inactive."
+    };
+  }
+  if (!isIrCapableDevice(row)) {
+    return {
+      ok: false,
+      code: "device_not_ir_capable",
+      message: "Device does not expose IR capability."
+    };
+  }
+
+  if (params.command.operation === "recognize_candidate") {
+    if (!env.IR_AUTOREC_ENABLED) {
+      return {
+        ok: false,
+        code: "feature_disabled",
+        message: "IR auto-recognition is disabled."
+      };
+    }
+
+    const candidate = params.command.candidate ?? {};
+    const protocol = typeof candidate.protocol === "string" ? candidate.protocol.trim() : "";
+    const payload = typeof candidate.payload === "string" ? candidate.payload : "";
+    if (!protocol || !payload) {
+      return {
+        ok: false,
+        code: "validation_error",
+        message: "candidate.protocol and candidate.payload are required."
+      };
+    }
+    const candidateFrequency =
+      typeof candidate.frequency_hz === "number" && Number.isInteger(candidate.frequency_hz)
+        ? candidate.frequency_hz
+        : null;
+    const payloadFormat =
+      typeof candidate.payload_format === "string" ? candidate.payload_format : null;
+    const brandHint =
+      typeof candidate.brand_hint === "string"
+        ? candidate.brand_hint
+        : typeof params.command.metadata?.brand_hint === "string"
+          ? params.command.metadata.brand_hint
+          : null;
+    const modelHint =
+      typeof candidate.model_hint === "string"
+        ? candidate.model_hint
+        : typeof params.command.metadata?.model_hint === "string"
+          ? params.command.metadata.model_hint
+          : null;
+    const normalizedCandidate = normalizeIrPayload({
+      protocol,
+      frequencyHz: candidateFrequency,
+      payload,
+      payloadFormat
+    });
+    const rankRecords = await loadIrRankRecords(params.deviceId);
+    const matches = rankIrMatches(normalizedCandidate, rankRecords, {
+      brandHint,
+      modelHint,
+      topN: params.command.topN ?? 5
+    });
+
+    await writeAuditLog({
+      deviceId: params.deviceId,
+      userId: params.userId,
+      action: "ws_ir_recognize_candidate",
+      source: "ws_client",
+      details: {
+        candidate_fingerprint: normalizedCandidate.payloadFingerprint,
+        top_n: params.command.topN ?? 5,
+        result_count: matches.length
+      }
+    });
+
+    return {
+      ok: true,
+      deviceUid: row.device_uid,
+      latencyMs: 0,
+      result: {
+        candidate: {
+          protocol_norm: normalizedCandidate.protocolNorm,
+          frequency_norm_hz: normalizedCandidate.frequencyNormHz,
+          payload_format: normalizedCandidate.payloadFormat,
+          payload_fingerprint: normalizedCandidate.payloadFingerprint
+        },
+        matches
+      }
+    };
+  }
+
+  if (params.command.operation === "delete_code") {
+    const codeId = params.command.codeId?.trim() ?? "";
+    const codeName = params.command.codeName?.trim() ?? "";
+    if (!codeId && !codeName) {
+      return {
+        ok: false,
+        code: "validation_error",
+        message: "code_id or code_name is required for delete_code."
+      };
+    }
+    const removed = codeId
+      ? await query(
+        `DELETE FROM device_ir_codes
+           WHERE device_id = $1
+             AND id = $2`,
+        [params.deviceId, codeId]
+      )
+      : await query(
+        `DELETE FROM device_ir_codes
+           WHERE device_id = $1
+             AND code_name = $2`,
+        [params.deviceId, codeName]
+      );
+    if (!removed.rowCount || removed.rowCount === 0) {
+      return {
+        ok: false,
+        code: "not_found",
+        message: "IR code not found."
+      };
+    }
+
+    await writeAuditLog({
+      deviceId: params.deviceId,
+      userId: params.userId,
+      action: "ws_ir_delete_code",
+      source: "ws_client",
+      details: {
+        code_id: codeId || null,
+        code_name: codeName || null
+      }
+    });
+
+    void realtimeHub.sendToDevice(row.device_uid, {
+      type: "ir_cache_sync",
+      action: "delete",
+      code_id: codeId || null,
+      code_name: codeName || null,
+      ts: nowIso()
+    });
+
+    return {
+      ok: true,
+      deviceUid: row.device_uid,
+      latencyMs: 0
+    };
+  }
+
+  let selectedCode: DeviceIrCodeRow | null = null;
+  if (params.command.operation === "send_code") {
+    const codeId = params.command.codeId?.trim() ?? "";
+    const codeName = params.command.codeName?.trim() ?? "";
+    if (!codeId && !codeName) {
+      return {
+        ok: false,
+        code: "validation_error",
+        message: "code_id or code_name is required for send_code."
+      };
+    }
+    const loaded = codeId
+      ? await query<DeviceIrCodeRow>(
+        `SELECT
+             id, device_id, owner_user_id, code_name, protocol, protocol_norm,
+             frequency_hz, frequency_norm_hz, payload, payload_format, payload_fingerprint,
+             source_type, source_ref, normalized_payload, metadata, learned_at, created_at, updated_at
+           FROM device_ir_codes
+           WHERE device_id = $1
+             AND id = $2
+           LIMIT 1`,
+        [params.deviceId, codeId]
+      )
+      : await query<DeviceIrCodeRow>(
+        `SELECT
+             id, device_id, owner_user_id, code_name, protocol, protocol_norm,
+             frequency_hz, frequency_norm_hz, payload, payload_format, payload_fingerprint,
+             source_type, source_ref, normalized_payload, metadata, learned_at, created_at, updated_at
+           FROM device_ir_codes
+           WHERE device_id = $1
+             AND code_name = $2
+           LIMIT 1`,
+        [params.deviceId, codeName]
+      );
+    selectedCode = loaded.rows[0] ?? null;
+    if (!selectedCode) {
+      return {
+        ok: false,
+        code: "not_found",
+        message: "IR code not found."
+      };
+    }
+  }
+
+  let learnedCode: DeviceIrCodeRow | null = null;
+  if (params.command.operation === "learn_save" && params.command.candidate) {
+    const candidate = params.command.candidate;
+    const protocol = typeof candidate.protocol === "string" ? candidate.protocol.trim() : "";
+    const payload = typeof candidate.payload === "string" ? candidate.payload : "";
+    if (!protocol || !payload) {
+      return {
+        ok: false,
+        code: "validation_error",
+        message: "candidate.protocol and candidate.payload are required for learn_save."
+      };
+    }
+    const frequency =
+      typeof candidate.frequency_hz === "number" && Number.isInteger(candidate.frequency_hz)
+        ? candidate.frequency_hz
+        : null;
+    const learnType =
+      params.command.learnType ??
+      parseIrLearnType((params.command.metadata as Record<string, unknown> | undefined)?.learn_type);
+    const isAcLearn = learnType === "ac";
+    const codeName = params.command.codeName?.trim() || `${isAcLearn ? "ac" : "learned"}-${nowIso()}`;
+    learnedCode = await upsertDeviceIrCode({
+      deviceId: params.deviceId,
+      ownerUserId: row.owner_user_id,
+      codeName,
+      protocol,
+      frequencyHz: frequency,
+      payload,
+      payloadFormat:
+        typeof candidate.payload_format === "string" ? candidate.payload_format : "raw",
+      sourceType: "device",
+      sourceRef: isAcLearn ? "ws_learn_save_ac" : "ws_learn_save",
+      metadata: {
+        ...(asObject(candidate.metadata)),
+        ...(params.command.metadata ?? {}),
+        ...(learnType ? { learn_type: learnType } : {}),
+        ...(isAcLearn ? { entity_kind: "ac_remote" } : {})
+      }
+    });
+  }
+
+  const commandId = newId();
+  const pendingAck = realtimeHub.createPendingAck(commandId, row.device_uid, params.timeoutMs);
+  const payload: Record<string, unknown> = {
+    command_id: commandId,
+    ts: nowIso()
+  };
+
+  if (params.command.operation === "learn_start") {
+    payload.type = "ir_learn_start";
+    payload.learn_type = params.command.learnType ?? "button";
+    if (params.command.codeName) {
+      payload.code_name = params.command.codeName;
+    }
+  } else if (params.command.operation === "learn_test") {
+    payload.type = "ir_learn_test";
+  } else if (params.command.operation === "learn_save") {
+    payload.type = "ir_learn_save";
+    if (learnedCode) {
+      payload.code_id = learnedCode.id;
+      payload.code_name = learnedCode.code_name;
+    } else if (params.command.codeName) {
+      payload.code_name = params.command.codeName;
+    }
+  } else if (params.command.operation === "learn_discard") {
+    payload.type = "ir_learn_discard";
+  } else if (params.command.operation === "send_code") {
+    payload.type = "ir_send";
+    payload.code_id = selectedCode?.id ?? params.command.codeId ?? null;
+    payload.code_name = selectedCode?.code_name ?? params.command.codeName ?? null;
+    payload.protocol = selectedCode?.protocol ?? null;
+    payload.frequency_hz = selectedCode?.frequency_hz ?? null;
+    payload.payload = selectedCode?.payload ?? null;
+    payload.payload_format = selectedCode?.payload_format ?? null;
+    payload.payload_fingerprint = selectedCode?.payload_fingerprint ?? null;
+    payload.normalized_payload = selectedCode ? asObject(selectedCode.normalized_payload) : null;
+    payload.metadata = selectedCode ? asObject(selectedCode.metadata) : null;
+  } else {
+    return {
+      ok: false,
+      code: "validation_error",
+      message: "Unsupported IR operation."
+    };
+  }
+
+  const sent = realtimeHub.sendToDevice(row.device_uid, payload);
+  if (!sent) {
+    realtimeHub.resolveAck(commandId, {
+      ok: false,
+      error: "device_disconnected"
+    });
+    return {
+      ok: false,
+      code: "device_offline",
+      message: "Device is offline."
+    };
+  }
+
+  try {
+    const ack = await pendingAck;
+    if (!ack.ok) {
+      const errorCode =
+        typeof ack.error === "string" && ack.error.trim().length > 0
+          ? ack.error.trim()
+          : "device_rejected";
+      return {
+        ok: false,
+        code: errorCode,
+        message: "Device rejected IR command.",
+        details: {
+          command_id: commandId,
+          operation: params.command.operation
+        }
+      };
+    }
+
+    await writeAuditLog({
+      deviceId: params.deviceId,
+      userId: params.userId,
+      action: `ws_ir_${params.command.operation}`,
+      source: "ws_client",
+      details: {
+        command_id: commandId,
+        code_id: selectedCode?.id ?? learnedCode?.id ?? null,
+        code_name: selectedCode?.code_name ?? learnedCode?.code_name ?? params.command.codeName ?? null
+      }
+    });
+
+    if (learnedCode) {
+      void realtimeHub.sendToDevice(row.device_uid, {
+        type: "ir_cache_sync",
+        action: "upsert",
+        code_id: learnedCode.id,
+        code_name: learnedCode.code_name,
+        payload_fingerprint: learnedCode.payload_fingerprint ?? null,
+        ts: nowIso()
+      });
+    }
+
+    return {
+      ok: true,
+      deviceUid: row.device_uid,
+      latencyMs: ack.latencyMs,
+      commandId,
+      result: {
+        code_id: selectedCode?.id ?? learnedCode?.id ?? null,
+        code_name: selectedCode?.code_name ?? learnedCode?.code_name ?? params.command.codeName ?? null
+      }
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message === "ack_timeout") {
+      return {
+        ok: false,
+        code: "device_unreachable",
+        message: "Timed out waiting for device acknowledgement.",
+        details: {
+          command_id: commandId,
+          timeout_ms: params.timeoutMs
+        }
+      };
+    }
+    if (error instanceof Error && error.message === "device_disconnected") {
+      return {
+        ok: false,
+        code: "device_offline",
+        message: "Device disconnected before acknowledgement.",
+        details: {
+          command_id: commandId
+        }
+      };
+    }
+    return {
+      ok: false,
+      code: "device_ack_failed",
+      message: "Device acknowledgement failed.",
+      details: {
+        command_id: commandId
+      }
+    };
+  }
+}
+
 async function sendWifiConfigCommand(params: {
   userId: string;
   role: string;
@@ -1016,44 +1807,44 @@ async function sendWifiConfigCommand(params: {
 }): Promise<
   | { ok: true; deviceUid: string; latencyMs: number }
   | {
-      ok: false;
-      code: string;
-      message: string;
-      details?: Record<string, unknown>;
-    }
+    ok: false;
+    code: string;
+    message: string;
+    details?: Record<string, unknown>;
+  }
 > {
   const isAdminActor = params.role === "admin";
   const lookup = isAdminActor
     ? await query<{ device_uid: string }>(
-        `SELECT device_uid
+      `SELECT device_uid
          FROM devices
          WHERE id = $1
            AND is_active = TRUE
          LIMIT 1`,
-        [params.deviceId]
-      )
+      [params.deviceId]
+    )
     : await query<{ device_uid: string }>(
-        `SELECT device_uid
+      `SELECT device_uid
          FROM devices
          WHERE id = $1
            AND owner_user_id = $2
            AND is_active = TRUE
          LIMIT 1`,
-        [params.deviceId, params.userId]
-      );
+      [params.deviceId, params.userId]
+    );
   const row = lookup.rows[0];
   if (!row) {
     return isAdminActor
       ? {
-          ok: false,
-          code: "not_found",
-          message: "Device not found or inactive."
-        }
+        ok: false,
+        code: "not_found",
+        message: "Device not found or inactive."
+      }
       : {
-          ok: false,
-          code: "forbidden",
-          message: "Only the device owner can control this device."
-        };
+        ok: false,
+        code: "forbidden",
+        message: "Only the device owner can control this device."
+      };
   }
 
   const commandId = newId();
@@ -1061,29 +1852,29 @@ async function sendWifiConfigCommand(params: {
   const payload =
     params.command.operation === "clear"
       ? {
-          type: "config_update",
-          command_id: commandId,
-          connectivity: {
-            wifi: {
-              op: "clear",
-              reboot: params.command.reboot
-            }
-          },
-          ts: nowIso()
-        }
+        type: "config_update",
+        command_id: commandId,
+        connectivity: {
+          wifi: {
+            op: "clear",
+            reboot: params.command.reboot
+          }
+        },
+        ts: nowIso()
+      }
       : {
-          type: "config_update",
-          command_id: commandId,
-          connectivity: {
-            wifi: {
-              op: "set",
-              ssid: params.command.ssid,
-              password: params.command.password,
-              reboot: params.command.reboot
-            }
-          },
-          ts: nowIso()
-        };
+        type: "config_update",
+        command_id: commandId,
+        connectivity: {
+          wifi: {
+            op: "set",
+            ssid: params.command.ssid,
+            password: params.command.password,
+            reboot: params.command.reboot
+          }
+        },
+        ts: nowIso()
+      };
 
   const sent = realtimeHub.sendToDevice(row.device_uid, payload);
   if (!sent) {
@@ -1148,7 +1939,7 @@ async function sendWifiConfigCommand(params: {
       details: {
         command_id: commandId
       }
-      };
+    };
   }
 }
 
@@ -1159,43 +1950,43 @@ async function loadDeviceForConfigCommand(params: {
 }): Promise<
   | { ok: true; row: DeviceConfigLookupRow }
   | {
-      ok: false;
-      code: string;
-      message: string;
-    }
+    ok: false;
+    code: string;
+    message: string;
+  }
 > {
   const isAdminActor = params.role === "admin";
   const lookup = isAdminActor
     ? await query<DeviceConfigLookupRow>(
-        `SELECT
+      `SELECT
            id, device_uid, is_active, relay_count, button_count, input_config, config
          FROM devices
          WHERE id = $1
          LIMIT 1`,
-        [params.deviceId]
-      )
+      [params.deviceId]
+    )
     : await query<DeviceConfigLookupRow>(
-        `SELECT
+      `SELECT
            id, device_uid, is_active, relay_count, button_count, input_config, config
          FROM devices
          WHERE id = $1
            AND owner_user_id = $2
          LIMIT 1`,
-        [params.deviceId, params.userId]
-      );
+      [params.deviceId, params.userId]
+    );
   const row = lookup.rows[0];
   if (!row) {
     return isAdminActor
       ? {
-          ok: false,
-          code: "not_found",
-          message: "Device not found."
-        }
+        ok: false,
+        code: "not_found",
+        message: "Device not found."
+      }
       : {
-          ok: false,
-          code: "forbidden",
-          message: "Only the device owner can control this device."
-        };
+        ok: false,
+        code: "forbidden",
+        message: "Only the device owner can control this device."
+      };
   }
   if (!row.is_active) {
     return {
@@ -1303,19 +2094,19 @@ async function sendDeviceConfigCommand(params: {
   timeoutMs: number;
 }): Promise<
   | {
-      ok: true;
-      deviceUid: string;
-      latencyMs: number;
-      commandId: string;
-      inputConfig?: InputConfigRow[];
-      config?: Record<string, unknown>;
-    }
+    ok: true;
+    deviceUid: string;
+    latencyMs: number;
+    commandId: string;
+    inputConfig?: InputConfigRow[];
+    config?: Record<string, unknown>;
+  }
   | {
-      ok: false;
-      code: string;
-      message: string;
-      details?: Record<string, unknown>;
-    }
+    ok: false;
+    code: string;
+    message: string;
+    details?: Record<string, unknown>;
+  }
 > {
   const loaded = await loadDeviceForConfigCommand(params);
   if (!loaded.ok) {
@@ -1491,42 +2282,42 @@ async function sendDeviceControlCommand(params: {
 }): Promise<
   | { ok: true; deviceUid: string; latencyMs: number }
   | {
-      ok: false;
-      code: string;
-      message: string;
-      details?: Record<string, unknown>;
-    }
+    ok: false;
+    code: string;
+    message: string;
+    details?: Record<string, unknown>;
+  }
 > {
   const isAdminActor = params.role === "admin";
   const lookup = isAdminActor
     ? await query<{ device_uid: string; is_active: boolean }>(
-        `SELECT device_uid, is_active
+      `SELECT device_uid, is_active
          FROM devices
          WHERE id = $1
          LIMIT 1`,
-        [params.deviceId]
-      )
+      [params.deviceId]
+    )
     : await query<{ device_uid: string; is_active: boolean }>(
-        `SELECT device_uid, is_active
+      `SELECT device_uid, is_active
          FROM devices
          WHERE id = $1
            AND owner_user_id = $2
          LIMIT 1`,
-        [params.deviceId, params.userId]
-      );
+      [params.deviceId, params.userId]
+    );
   const row = lookup.rows[0];
   if (!row) {
     return isAdminActor
       ? {
-          ok: false,
-          code: "not_found",
-          message: "Device not found."
-        }
+        ok: false,
+        code: "not_found",
+        message: "Device not found."
+      }
       : {
-          ok: false,
-          code: "forbidden",
-          message: "Only the device owner can control this device."
-        };
+        ok: false,
+        code: "forbidden",
+        message: "Only the device owner can control this device."
+      };
   }
   if (!row.is_active) {
     return {
@@ -1622,52 +2413,52 @@ async function sendOtaControlCommand(params: {
   timeoutMs: number;
 }): Promise<
   | {
-      ok: true;
-      deviceUid: string;
-      latencyMs: number;
-      updateAvailable: boolean;
-      transferId?: string;
-      targetVersion?: string;
-    }
+    ok: true;
+    deviceUid: string;
+    latencyMs: number;
+    updateAvailable: boolean;
+    transferId?: string;
+    targetVersion?: string;
+  }
   | {
-      ok: false;
-      code: string;
-      message: string;
-      details?: Record<string, unknown>;
-    }
+    ok: false;
+    code: string;
+    message: string;
+    details?: Record<string, unknown>;
+  }
 > {
   const isAdminActor = params.role === "admin";
   const lookup = isAdminActor
     ? await query<DeviceOtaLookupRow>(
-        `SELECT device_uid, is_active
+      `SELECT device_uid, is_active
                 , id, model, firmware_version, ota_channel, ota_security_version
          FROM devices
          WHERE id = $1
          LIMIT 1`,
-        [params.deviceId]
-      )
+      [params.deviceId]
+    )
     : await query<DeviceOtaLookupRow>(
-        `SELECT device_uid, is_active
+      `SELECT device_uid, is_active
                 , id, model, firmware_version, ota_channel, ota_security_version
          FROM devices
          WHERE id = $1
            AND owner_user_id = $2
          LIMIT 1`,
-        [params.deviceId, params.userId]
-      );
+      [params.deviceId, params.userId]
+    );
   const row = lookup.rows[0];
   if (!row) {
     return isAdminActor
       ? {
-          ok: false,
-          code: "not_found",
-          message: "Device not found."
-        }
+        ok: false,
+        code: "not_found",
+        message: "Device not found."
+      }
       : {
-          ok: false,
-          code: "forbidden",
-          message: "Only the device owner can control this device."
-        };
+        ok: false,
+        code: "forbidden",
+        message: "Only the device owner can control this device."
+      };
   }
   if (!row.is_active) {
     return {
@@ -2116,8 +2907,8 @@ function handleDeviceSocket(
 
         const relays = Array.isArray(message.relays)
           ? message.relays
-              .map((item) => asBooleanLike(item))
-              .filter((item): item is boolean => item !== null)
+            .map((item) => asBooleanLike(item))
+            .filter((item): item is boolean => item !== null)
           : [];
         if (relays.length === 0) {
           return;
@@ -2188,6 +2979,120 @@ function handleDeviceSocket(
         error,
         payload: message
       });
+      return;
+    }
+
+    if (
+      type === "ir_learn_state" ||
+      type === "ir_learn_candidate" ||
+      type === "ir_send_result" ||
+      type === "ir_cache_status"
+    ) {
+      void updateLastSeen(deviceId, req.socket.remoteAddress ?? "").catch(() => undefined);
+
+      void (async () => {
+        const owner = await readOwnerUserId(deviceId);
+        ownerUserId = owner;
+        const outbound: Record<string, unknown> = {
+          ...message,
+          device_uid: deviceUid
+        };
+
+        const messageMeta = asObject(message.metadata);
+        const candidateRaw = asRecord(message.candidate) ?? asRecord(message);
+        const candidateProtocol =
+          typeof candidateRaw?.protocol === "string" ? candidateRaw.protocol.trim() : "";
+        const candidatePayload =
+          typeof candidateRaw?.payload === "string" ? candidateRaw.payload : "";
+        const candidateFrequency =
+          typeof candidateRaw?.frequency_hz === "number" && Number.isInteger(candidateRaw.frequency_hz)
+            ? candidateRaw.frequency_hz
+            : null;
+        const candidatePayloadFormat =
+          typeof candidateRaw?.payload_format === "string" ? candidateRaw.payload_format : "raw";
+
+        if (type === "ir_learn_candidate" && candidateProtocol && candidatePayload && env.IR_AUTOREC_ENABLED) {
+          const normalizedCandidate = normalizeIrPayload({
+            protocol: candidateProtocol,
+            frequencyHz: candidateFrequency,
+            payload: candidatePayload,
+            payloadFormat: candidatePayloadFormat
+          });
+          const records = await loadIrRankRecords(deviceId);
+          const matches = rankIrMatches(normalizedCandidate, records, {
+            brandHint:
+              typeof candidateRaw?.brand_hint === "string"
+                ? candidateRaw.brand_hint
+                : typeof messageMeta.brand_hint === "string"
+                  ? messageMeta.brand_hint
+                  : null,
+            modelHint:
+              typeof candidateRaw?.model_hint === "string"
+                ? candidateRaw.model_hint
+                : typeof messageMeta.model_hint === "string"
+                  ? messageMeta.model_hint
+                  : null,
+            topN:
+              typeof message.top_n === "number" && Number.isInteger(message.top_n)
+                ? Math.min(Math.max(message.top_n, 1), 20)
+                : 5
+          });
+          outbound.candidate = {
+            protocol_norm: normalizedCandidate.protocolNorm,
+            frequency_norm_hz: normalizedCandidate.frequencyNormHz,
+            payload_format: normalizedCandidate.payloadFormat,
+            payload_fingerprint: normalizedCandidate.payloadFingerprint
+          };
+          outbound.recognition = {
+            matches
+          };
+        }
+
+        if (type === "ir_learn_state") {
+          const learnState =
+            typeof message.state === "string"
+              ? message.state.trim().toLowerCase()
+              : "";
+          if (learnState === "saved" && candidateProtocol && candidatePayload) {
+            const codeNameRaw =
+              typeof message.code_name === "string"
+                ? message.code_name
+                : typeof candidateRaw?.code_name === "string"
+                  ? candidateRaw.code_name
+                  : `learned-${nowIso()}`;
+
+            const savedCode = await upsertDeviceIrCode({
+              deviceId,
+              ownerUserId: owner,
+              codeName: codeNameRaw,
+              protocol: candidateProtocol,
+              frequencyHz: candidateFrequency,
+              payload: candidatePayload,
+              payloadFormat: candidatePayloadFormat,
+              sourceType: "device",
+              sourceRef: "device_learn_state_saved",
+              metadata: {
+                ...asObject(candidateRaw?.metadata),
+                ...messageMeta
+              }
+            });
+            outbound.saved_code = {
+              id: savedCode.id,
+              code_name: savedCode.code_name,
+              payload_fingerprint: savedCode.payload_fingerprint
+            };
+          }
+        }
+
+        await writeAuditLog({
+          deviceId,
+          action: `${type}_report`,
+          source: "device",
+          details: outbound
+        });
+
+        broadcastDeviceEvent(owner, outbound);
+      })().catch(() => undefined);
       return;
     }
 
@@ -2360,9 +3265,9 @@ function handleClientSocket(
     const action = typeof message.action === "string" ? message.action : "";
     const timeoutMs =
       typeof message.timeout_ms === "number" &&
-      Number.isInteger(message.timeout_ms) &&
-      message.timeout_ms >= 1000 &&
-      message.timeout_ms <= 30000
+        Number.isInteger(message.timeout_ms) &&
+        message.timeout_ms >= 1000 &&
+        message.timeout_ms <= 30000
         ? message.timeout_ms
         : undefined;
 
@@ -2590,6 +3495,79 @@ function handleClientSocket(
       command = {
         scope: "connectivity_mode",
         mode
+      };
+    } else if (scope === "ir") {
+      const operation = parseIrOperation(
+        (typeof message.operation === "string" ? message.operation : null) ??
+        (typeof message.action === "string" ? message.action : null) ??
+        ""
+      );
+      if (!operation) {
+        sendJson(socket, {
+          type: "cmd_ack",
+          ok: false,
+          code: "validation_error",
+          message:
+            "operation must be learn_start|learn_test|learn_save|learn_discard|send_code|delete_code|recognize_candidate.",
+          request_id: requestId
+        });
+        return;
+      }
+
+      const codeId =
+        typeof message.code_id === "string"
+          ? message.code_id.trim()
+          : typeof message.ir_code_id === "string"
+            ? message.ir_code_id.trim()
+            : "";
+      const codeName =
+        typeof message.code_name === "string"
+          ? message.code_name.trim()
+          : typeof message.name === "string"
+            ? message.name.trim()
+            : "";
+      const candidate = asRecord(message.candidate);
+      const metadata = asRecord(message.metadata) ?? {};
+      const learnType =
+        parseIrLearnType(message.learn_type) ??
+        parseIrLearnType(message.learnType) ??
+        parseIrLearnType(message.mode);
+      const topN =
+        typeof message.top_n === "number" && Number.isInteger(message.top_n)
+          ? Math.min(Math.max(message.top_n, 1), 20)
+          : undefined;
+
+      if ((operation === "send_code" || operation === "delete_code") && !codeId && !codeName) {
+        sendJson(socket, {
+          type: "cmd_ack",
+          ok: false,
+          code: "validation_error",
+          message: "code_id or code_name is required.",
+          request_id: requestId
+        });
+        return;
+      }
+
+      if (operation === "recognize_candidate" && !candidate) {
+        sendJson(socket, {
+          type: "cmd_ack",
+          ok: false,
+          code: "validation_error",
+          message: "candidate is required for recognize_candidate.",
+          request_id: requestId
+        });
+        return;
+      }
+
+      command = {
+        scope: "ir",
+        operation,
+        learnType,
+        codeId: codeId || undefined,
+        codeName: codeName || undefined,
+        candidate: candidate ?? undefined,
+        metadata,
+        topN
       };
     } else if (scope === "ota") {
       const operationRaw =
@@ -2823,6 +3801,42 @@ function handleClientSocket(
               update_available: otaControlResult.updateAvailable,
               transfer_id: otaControlResult.transferId ?? null,
               target_version: otaControlResult.targetVersion ?? null
+            }
+          });
+          return;
+        }
+
+        if (command.scope === "ir") {
+          const irControlResult = await sendIrControlCommand({
+            userId: actorUserId,
+            role: actorRole,
+            deviceId,
+            command,
+            timeoutMs: timeoutMs ?? IR_CONTROL_COMMAND_TIMEOUT_MS
+          });
+          if (!irControlResult.ok) {
+            sendJson(socket, {
+              type: "cmd_ack",
+              ok: false,
+              code: irControlResult.code,
+              message: irControlResult.message,
+              details: irControlResult.details ?? null,
+              request_id: requestId
+            });
+            return;
+          }
+          sendJson(socket, {
+            type: "cmd_ack",
+            ok: true,
+            request_id: requestId,
+            result: {
+              device_id: deviceId,
+              device_uid: irControlResult.deviceUid,
+              scope: "ir",
+              operation: command.operation,
+              command_id: irControlResult.commandId ?? null,
+              latency_ms: irControlResult.latencyMs,
+              ...(irControlResult.result ?? {})
             }
           });
           return;
