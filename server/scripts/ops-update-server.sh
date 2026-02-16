@@ -17,6 +17,7 @@ Options:
   --skip-tests              Skip npm test:unit during update
   --skip-migrate            Skip npm run migrate
   --skip-pull               Skip git fetch/pull (use current working tree)
+  --hard-reset              Discard local changes and reset to origin
   --fast                    Shortcut for --skip-tests
   -h, --help                Show help
 
@@ -35,6 +36,7 @@ HEALTH_URL="http://127.0.0.1:3000/health"
 SKIP_TESTS=1
 SKIP_MIGRATE=0
 SKIP_PULL=0
+HARD_RESET=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -68,6 +70,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-pull)
       SKIP_PULL=1
+      shift
+      ;;
+    --hard-reset)
+      HARD_RESET=1
       shift
       ;;
     --fast)
@@ -111,8 +117,13 @@ if [[ $SKIP_PULL -eq 0 ]]; then
   echo "==> Checkout branch $BRANCH_NAME"
   git checkout "$BRANCH_NAME"
 
-  echo "==> Pull latest changes"
-  git pull --ff-only origin "$BRANCH_NAME"
+  if [[ $HARD_RESET -eq 1 ]]; then
+    echo "==> Hard resetting to origin/$BRANCH_NAME"
+    git reset --hard "origin/$BRANCH_NAME"
+  else
+    echo "==> Pull latest changes"
+    git pull --ff-only origin "$BRANCH_NAME"
+  fi
 fi
 
 DEPLOY_REV="$(git rev-parse --short HEAD)"
