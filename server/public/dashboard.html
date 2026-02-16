@@ -776,6 +776,7 @@
       automationTestingByDevice: new Map(),
       irCodesByDevice: new Map(),
       irLastResultByDevice: new Map(),
+      irFormByDevice: new Map(),
       pendingRealtimeCommands: new Map(),
       realtimeSocket: null,
       realtimeAuthed: false,
@@ -2165,6 +2166,7 @@
       state.automationTestingByDevice.clear();
       state.irCodesByDevice.clear();
       state.irLastResultByDevice.clear();
+      state.irFormByDevice.clear();
       persistSession();
     }
 
@@ -2825,17 +2827,21 @@
         throw new Error("MQTT host is required in local MQTT mode.");
       }
 
+      const mqtt = {
+        enabled: enabledEl.checked,
+        host,
+        port: portParsed,
+        username: usernameEl.value,
+        discovery_prefix: discoveryEl.value.trim() || "homeassistant",
+        base_topic: baseTopicEl.value.trim() || "d"
+      };
+      if (passwordEl.value.length > 0) {
+        mqtt.password = passwordEl.value;
+      }
+
       return {
         mode,
-        mqtt: {
-          enabled: enabledEl.checked,
-          host,
-          port: portParsed,
-          username: usernameEl.value,
-          password: passwordEl.value,
-          discovery_prefix: discoveryEl.value.trim() || "homeassistant",
-          base_topic: baseTopicEl.value.trim() || "d"
-        }
+        mqtt
       };
     }
 
@@ -3088,6 +3094,112 @@
       );
     }
 
+    function getIrFormState(deviceId) {
+      const key = String(deviceId || "").trim();
+      const cached = key ? state.irFormByDevice.get(key) : null;
+      return {
+        learnType: cached && cached.learnType === "ac" ? "ac" : "button",
+        codeName: cached && typeof cached.codeName === "string" ? cached.codeName : "",
+        topN: cached && typeof cached.topN === "string" && cached.topN.trim().length > 0
+          ? cached.topN
+          : "5",
+        candidateProtocol:
+          cached && typeof cached.candidateProtocol === "string" ? cached.candidateProtocol : "",
+        candidateFrequency:
+          cached && typeof cached.candidateFrequency === "string" ? cached.candidateFrequency : "",
+        candidateFormat:
+          cached && typeof cached.candidateFormat === "string" ? cached.candidateFormat : "",
+        candidateBrand:
+          cached && typeof cached.candidateBrand === "string" ? cached.candidateBrand : "",
+        candidateModel:
+          cached && typeof cached.candidateModel === "string" ? cached.candidateModel : "",
+        candidatePayload:
+          cached && typeof cached.candidatePayload === "string" ? cached.candidatePayload : ""
+      };
+    }
+
+    function setIrFormState(deviceId, patch) {
+      const key = String(deviceId || "").trim();
+      if (!key || !patch || typeof patch !== "object") {
+        return;
+      }
+      const next = {
+        ...getIrFormState(key),
+        ...patch
+      };
+      next.learnType = next.learnType === "ac" ? "ac" : "button";
+      if (typeof next.topN !== "string" || next.topN.trim().length === 0) {
+        next.topN = "5";
+      }
+      state.irFormByDevice.set(key, next);
+    }
+
+    function getDeviceIdFromCardElement(element) {
+      if (!(element instanceof Element)) {
+        return "";
+      }
+      const card = element.closest(".device-card");
+      if (!(card instanceof HTMLElement)) {
+        return "";
+      }
+      return String(card.getAttribute("data-device-id") || "").trim();
+    }
+
+    function captureIrFormFromCard(deviceId, card) {
+      const key = String(deviceId || "").trim();
+      if (!key || !(card instanceof HTMLElement)) {
+        return;
+      }
+      const learnTypeEl = card.querySelector("[data-ir-learn-type]");
+      const codeNameEl = card.querySelector("[data-ir-code-name]");
+      const topNEl = card.querySelector("[data-ir-top-n]");
+      const protocolEl = card.querySelector("[data-ir-candidate-protocol]");
+      const frequencyEl = card.querySelector("[data-ir-candidate-frequency]");
+      const formatEl = card.querySelector("[data-ir-candidate-format]");
+      const brandEl = card.querySelector("[data-ir-candidate-brand]");
+      const modelEl = card.querySelector("[data-ir-candidate-model]");
+      const payloadEl = card.querySelector("[data-ir-candidate-payload]");
+      setIrFormState(key, {
+        learnType:
+          learnTypeEl instanceof HTMLSelectElement && learnTypeEl.value.trim().toLowerCase() === "ac"
+            ? "ac"
+            : "button",
+        codeName: codeNameEl instanceof HTMLInputElement ? codeNameEl.value : "",
+        topN: topNEl instanceof HTMLInputElement ? topNEl.value : "5",
+        candidateProtocol: protocolEl instanceof HTMLInputElement ? protocolEl.value : "",
+        candidateFrequency: frequencyEl instanceof HTMLInputElement ? frequencyEl.value : "",
+        candidateFormat: formatEl instanceof HTMLInputElement ? formatEl.value : "",
+        candidateBrand: brandEl instanceof HTMLInputElement ? brandEl.value : "",
+        candidateModel: modelEl instanceof HTMLInputElement ? modelEl.value : "",
+        candidatePayload: payloadEl instanceof HTMLTextAreaElement ? payloadEl.value : ""
+      });
+    }
+
+    function syncIrFormStateFromElement(element) {
+      if (!(element instanceof HTMLElement)) {
+        return;
+      }
+      const deviceId = getDeviceIdFromCardElement(element);
+      if (!deviceId) {
+        return;
+      }
+
+      if (element.hasAttribute("data-ir-learn-type") ||
+          element.hasAttribute("data-ir-code-name") ||
+          element.hasAttribute("data-ir-top-n") ||
+          element.hasAttribute("data-ir-candidate-protocol") ||
+          element.hasAttribute("data-ir-candidate-frequency") ||
+          element.hasAttribute("data-ir-candidate-format") ||
+          element.hasAttribute("data-ir-candidate-brand") ||
+          element.hasAttribute("data-ir-candidate-model") ||
+          element.hasAttribute("data-ir-candidate-payload")) {
+        const card = element.closest(".device-card");
+        if (card instanceof HTMLElement) {
+          captureIrFormFromCard(deviceId, card);
+        }
+      }
+    }
+
     function getIrCodeCache(deviceId) {
       const key = String(deviceId || "").trim();
       const cached = state.irCodesByDevice.get(key);
@@ -3288,6 +3400,7 @@
     function renderIrControls(device, isOwner) {
       const deviceId = String(device?.id || "").trim();
       const cache = getIrCodeCache(deviceId);
+      const irForm = getIrFormState(deviceId);
       const canControl = Boolean(isOwner);
       const disabled = canControl ? "" : "disabled";
       const hasCodes = cache.codes.length > 0;
@@ -3318,13 +3431,13 @@
             <div>
               <label>Learn Type</label>
               <select data-ir-learn-type ${disabled}>
-                <option value="button">button</option>
-                <option value="ac">ac</option>
+                <option value="button" ${irForm.learnType === "button" ? "selected" : ""}>button</option>
+                <option value="ac" ${irForm.learnType === "ac" ? "selected" : ""}>ac</option>
               </select>
             </div>
             <div>
               <label>Code Name</label>
-              <input data-ir-code-name placeholder="power_toggle" ${disabled} />
+              <input data-ir-code-name placeholder="power_toggle" value="${escapeHtml(irForm.codeName)}" ${disabled} />
             </div>
           </div>
 
@@ -3344,7 +3457,7 @@
             </div>
             <div>
               <label>Candidate Top N</label>
-              <input data-ir-top-n type="number" min="1" max="20" value="5" ${disabled} />
+              <input data-ir-top-n type="number" min="1" max="20" value="${escapeHtml(irForm.topN)}" ${disabled} />
             </div>
           </div>
 
@@ -3357,29 +3470,29 @@
           <div class="grid cols-3">
             <div>
               <label>Candidate Protocol</label>
-              <input data-ir-candidate-protocol placeholder="NEC" ${disabled} />
+              <input data-ir-candidate-protocol placeholder="NEC" value="${escapeHtml(irForm.candidateProtocol)}" ${disabled} />
             </div>
             <div>
               <label>Candidate Frequency (Hz)</label>
-              <input data-ir-candidate-frequency type="number" min="1" step="1" placeholder="38000" ${disabled} />
+              <input data-ir-candidate-frequency type="number" min="1" step="1" placeholder="38000" value="${escapeHtml(irForm.candidateFrequency)}" ${disabled} />
             </div>
             <div>
               <label>Candidate Format</label>
-              <input data-ir-candidate-format placeholder="raw" ${disabled} />
+              <input data-ir-candidate-format placeholder="raw" value="${escapeHtml(irForm.candidateFormat)}" ${disabled} />
             </div>
             <div>
               <label>Brand Hint</label>
-              <input data-ir-candidate-brand placeholder="Samsung" ${disabled} />
+              <input data-ir-candidate-brand placeholder="Samsung" value="${escapeHtml(irForm.candidateBrand)}" ${disabled} />
             </div>
             <div>
               <label>Model Hint</label>
-              <input data-ir-candidate-model placeholder="TV-1234" ${disabled} />
+              <input data-ir-candidate-model placeholder="TV-1234" value="${escapeHtml(irForm.candidateModel)}" ${disabled} />
             </div>
           </div>
 
           <div>
             <label>Candidate Payload</label>
-            <textarea data-ir-candidate-payload placeholder="raw timings or encoded IR payload" ${disabled}></textarea>
+            <textarea data-ir-candidate-payload placeholder="raw timings or encoded IR payload" ${disabled}>${escapeHtml(irForm.candidatePayload)}</textarea>
           </div>
 
           <div class="device-action-row">
@@ -3492,6 +3605,37 @@
         const connectivityEditor = buildConnectivityEditor(d);
         const connectivityConfig = normalizedConnectivityConfig(d);
         const buttonStates = renderButtonStates(d);
+        const relayCount = Number.isInteger(d.relay_count) ? Math.max(Number(d.relay_count), 0) : relayRows.length;
+        const buttonCount = Number.isInteger(d.button_count) ? Math.max(Number(d.button_count), 0) : 0;
+        const hasInputMapping = buttonCount > 0 || (Array.isArray(d.input_config) && d.input_config.length > 0);
+        const capabilitySummary = asCapabilitySummaryList(d.capabilities);
+        const hasIrTx = capabilitySummary.some((item) => item.enabled && item.key === "ir_tx");
+        const hasIrRx = capabilitySummary.some((item) => item.enabled && item.key === "ir_rx");
+        const ioSummaryParts = [];
+        if (relayCount > 0) {
+          ioSummaryParts.push(`relays: ${relayCount}`);
+        }
+        if (buttonCount > 0) {
+          ioSummaryParts.push(`inputs: ${buttonCount}`);
+        }
+        if (irCapable) {
+          if (hasIrTx && hasIrRx) {
+            ioSummaryParts.push("ir: tx/rx");
+          } else if (hasIrTx) {
+            ioSummaryParts.push("ir: tx");
+          } else if (hasIrRx) {
+            ioSummaryParts.push("ir: rx");
+          } else {
+            ioSummaryParts.push("ir: enabled");
+          }
+        }
+        const ioSummaryLabel = ioSummaryParts.length > 0 ? ioSummaryParts.join(" | ") : "no relay/input channels";
+        const ioSummaryMeta =
+          relayCount > 0
+            ? `power_restore: ${d.power_restore_mode || "-"}`
+            : irCapable
+              ? "infrared control available"
+              : "power_restore: -";
         const mainControlSections = [];
 
         if (showRelayControls) {
@@ -3513,17 +3657,19 @@
           mainControlSections.push(renderIrControls(d, isOwner));
         }
 
-        mainControlSections.push(`
-          <section class="device-block">
-            <div class="device-block-title">Button Mapping</div>
-            ${buttonStates}
-            ${admin ? inputEditor : '<div class="muted">Button mapping edit is admin only.</div>'}
-            ${admin ? `
-            <div class="device-action-row">
-              <button data-save-io="${escapeHtml(d.id)}" class="secondary">Save I/O</button>
-            </div>` : ""}
-          </section>
-        `);
+        if (hasInputMapping) {
+          mainControlSections.push(`
+            <section class="device-block">
+              <div class="device-block-title">Input Mapping</div>
+              ${buttonStates}
+              ${admin ? inputEditor : '<div class="muted">Input mapping edit is admin only.</div>'}
+              ${admin ? `
+              <div class="device-action-row">
+                <button data-save-io="${escapeHtml(d.id)}" class="secondary">Save I/O</button>
+              </div>` : ""}
+            </section>
+          `);
+        }
 
         mainControlSections.push(`
           <section class="device-block">
@@ -3562,7 +3708,7 @@
                 <div class="meta">model: ${escapeHtml(d.model || "-")}</div>
               </div>
               <div class="device-head-actions">
-                <button class="collapse-toggle" data-device-collapse="${escapeHtml(cardKey)}">${isCollapsed ? "Expand" : "Collapse"}</button>
+                <button type="button" class="collapse-toggle" data-device-collapse="${escapeHtml(cardKey)}">${isCollapsed ? "Expand" : "Collapse"}</button>
               </div>
             </div>
 
@@ -3589,8 +3735,8 @@
                 </div>
                 <div class="device-meta-card">
                   <div class="device-meta-label">I/O Summary</div>
-                  <div class="device-meta-value">relays: ${escapeHtml(d.relay_count)} | buttons: ${escapeHtml(d.button_count)}</div>
-                  <div class="meta">power_restore: ${escapeHtml(d.power_restore_mode || "-")}</div>
+                  <div class="device-meta-value">${escapeHtml(ioSummaryLabel)}</div>
+                  <div class="meta">${escapeHtml(ioSummaryMeta)}</div>
                 </div>
               </div>
 
@@ -4441,11 +4587,10 @@
             throw new Error("Device card context not found.");
           }
 
-          const learnTypeEl = card.querySelector("[data-ir-learn-type]");
-          const learnTypeRaw = learnTypeEl instanceof HTMLSelectElement ? learnTypeEl.value.trim().toLowerCase() : "";
-          const learnType = learnTypeRaw === "ac" ? "ac" : "button";
-          const codeNameEl = card.querySelector("[data-ir-code-name]");
-          const codeName = codeNameEl instanceof HTMLInputElement ? codeNameEl.value.trim() : "";
+          captureIrFormFromCard(deviceId, card);
+          const irForm = getIrFormState(deviceId);
+          const learnType = irForm.learnType === "ac" ? "ac" : "button";
+          const codeName = irForm.codeName.trim();
           const selectEl = card.querySelector("[data-ir-code-select]");
           const selectedCodeId = selectEl instanceof HTMLSelectElement ? selectEl.value.trim() : "";
           if (selectedCodeId) {
@@ -4801,6 +4946,7 @@
     $("devicesTable").addEventListener("change", (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
+      syncIrFormStateFromElement(target);
 
       const irCodeSelectKey = target.getAttribute("data-ir-code-select");
       if (irCodeSelectKey) {
@@ -4849,6 +4995,12 @@
       if (scheduleScopeKey) {
         syncAutomationTestingControls(scheduleScopeKey);
       }
+    });
+
+    $("devicesTable").addEventListener("input", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      syncIrFormStateFromElement(target);
     });
 
     $("loadAuditBtn").addEventListener("click", async () => {
