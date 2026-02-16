@@ -2999,6 +2999,7 @@ function handleDeviceSocket(
     if (
       type === "ir_learn_state" ||
       type === "ir_learn_candidate" ||
+      type === "ir_learn_save" ||
       type === "ir_send_result" ||
       type === "ir_cache_status"
     ) {
@@ -3062,40 +3063,41 @@ function handleDeviceSocket(
           };
         }
 
-        if (type === "ir_learn_state") {
-          const learnState =
-            typeof message.state === "string"
-              ? message.state.trim().toLowerCase()
-              : "";
-          if (learnState === "saved" && candidateProtocol && candidatePayload) {
-            const codeNameRaw =
-              typeof message.code_name === "string"
-                ? message.code_name
-                : typeof candidateRaw?.code_name === "string"
-                  ? candidateRaw.code_name
-                  : `learned-${nowIso()}`;
+        const learnState =
+          typeof message.state === "string"
+            ? message.state.trim().toLowerCase()
+            : "";
+        const shouldPersistLearnedCode =
+          type === "ir_learn_save" ||
+          (type === "ir_learn_state" && learnState === "saved");
+        if (shouldPersistLearnedCode && candidateProtocol && candidatePayload) {
+          const codeNameRaw =
+            typeof message.code_name === "string"
+              ? message.code_name
+              : typeof candidateRaw?.code_name === "string"
+                ? candidateRaw.code_name
+                : `learned-${nowIso()}`;
 
-            const savedCode = await upsertDeviceIrCode({
-              deviceId,
-              ownerUserId: owner,
-              codeName: codeNameRaw,
-              protocol: candidateProtocol,
-              frequencyHz: candidateFrequency,
-              payload: candidatePayload,
-              payloadFormat: candidatePayloadFormat,
-              sourceType: "device",
-              sourceRef: "device_learn_state_saved",
-              metadata: {
-                ...asObject(candidateRaw?.metadata),
-                ...messageMeta
-              }
-            });
-            outbound.saved_code = {
-              id: savedCode.id,
-              code_name: savedCode.code_name,
-              payload_fingerprint: savedCode.payload_fingerprint
-            };
-          }
+          const savedCode = await upsertDeviceIrCode({
+            deviceId,
+            ownerUserId: owner,
+            codeName: codeNameRaw,
+            protocol: candidateProtocol,
+            frequencyHz: candidateFrequency,
+            payload: candidatePayload,
+            payloadFormat: candidatePayloadFormat,
+            sourceType: "device",
+            sourceRef: type === "ir_learn_save" ? "device_learn_save_event" : "device_learn_state_saved",
+            metadata: {
+              ...asObject(candidateRaw?.metadata),
+              ...messageMeta
+            }
+          });
+          outbound.saved_code = {
+            id: savedCode.id,
+            code_name: savedCode.code_name,
+            payload_fingerprint: savedCode.payload_fingerprint
+          };
         }
 
         await writeAuditLog({
